@@ -1,0 +1,64 @@
+[package]
+name = "we-sync"
+version = "0.1.0"
+description = "A Tauri App"
+authors = ["you"]
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "we_sync_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = ["config-json5"] }
+
+[dependencies]
+tauri = { version = "2", features = ["config-json5"] }
+tauri-plugin-opener = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1.0"
+thiserror = "1.0"
+clap = { version = "4.5", features = ["derive"] }
+sysinfo = "0.30"
+hex = "0.4"
+walkdir = "2.5"
+hmac = "0.12"
+sha2 = "0.10"
+aes = "0.8"
+block-modes = "0.9"
+block-padding = "0.3"
+subtle = "2.5"
+memchr = { version = "2.7", features = ["use_std"] }
+rayon = "1.10"
+
+# windows api (CNG + Registry + FileSystem + SystemInformation)
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_System_Threading",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_Memory",
+    "Win32_System_Registry",
+    "Win32_System_Environment",
+    "Win32_System_SystemInformation",
+    "Win32_Storage_FileSystem",
+    "Win32_Security",
+    "Win32_UI_Shell",
+    "Win32_Security_Cryptography",
+] }
+# legacy winapi for Version APIs (GetFileVersionInfo*) and low-level handle work
+winapi = { version = "0.3", features = [
+    "winver",
+    "minwindef",
+    "libloaderapi",
+    "handleapi",
+    "processthreadsapi",
+    "fileapi",
+    "winnt",
+] }
+
