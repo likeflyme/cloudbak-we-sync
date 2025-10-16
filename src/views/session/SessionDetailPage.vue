@@ -24,7 +24,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, watch } from 'vue'
+import { ref, onMounted, watch, inject } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { NLayoutContent } from 'naive-ui'
 import LoadingState from '@/components/SessionDetail/LoadingState.vue'
@@ -32,6 +32,7 @@ import EmptyState from '@/components/SessionDetail/EmptyState.vue'
 import SessionDetail from '@/views/session/SessionDetail.vue'
 import { getSessions } from '@/api/user'
 import type { Session } from '@/models/session'
+import { deleteSession as deleteSessionFromServer } from '@/api/user'
 
 const route = useRoute()
 const router = useRouter()
@@ -49,6 +50,11 @@ const normalize = (s: any): Session => {
     wx_acct_name: s.wx_acct_name ?? s.wx_name ?? '',
     wx_key: s.wx_key ?? s.data_key ?? '',
     data_key: s.data_key ?? s.wx_key ?? '',
+    // defaults to satisfy child prop requirements
+    syncFilters: s.syncFilters ?? '',
+    autoSync: s.autoSync ?? false,
+    lastActive: s.lastActive ?? '',
+    online: s.online ?? true,
   } as Session
 }
 
@@ -78,7 +84,7 @@ const toggleKeyVisibility = (key: 'data_key' | 'aes_key' | 'xor_key') => {
 }
 
 const updateSyncFilters = (value: string) => {
-  if (!session.value) return
+  if (!value || !session.value) return
   session.value.syncFilters = value
 }
 
@@ -105,9 +111,18 @@ const copyKey = async (key: string) => {
   }
 }
 
+const removeSessionById = inject<(id: number) => void>('removeSessionById')
+
 const deleteSession = () => {
   // TODO: 调用后端删除会话，完成后返回列表
-  router.push('/')
+  if (session.value?.id == null) return;
+  const id = session.value.id
+  deleteSessionFromServer(id).then(() => {
+    removeSessionById && removeSessionById(id)
+    router.push('/')
+  }).catch((error) => {
+    console.error('Error deleting session:', error)
+  });
 }
 </script>
 

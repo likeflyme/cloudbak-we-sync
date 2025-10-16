@@ -27,3 +27,7 @@ export const ftget = (url:string, options = {}) => {
 export const ftpost = (url:string, body:any, options = {}) => {
     return ft(url, { ...options, method: 'POST', body: JSON.stringify(body) });
 }
+
+export const ftdelete = (url:string, options = {}) => {
+    return ft(url, { ...options, method: 'DELETE' });
+}

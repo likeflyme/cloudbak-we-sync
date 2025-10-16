@@ -24,7 +24,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref, provide } from 'vue'
 import { NLayout, NLayoutContent } from 'naive-ui'
 import { invoke } from '@tauri-apps/api/core'
 import { removeToken } from '@/common/login'
@@ -140,12 +140,14 @@ const confirmAdd = (sessionData: PartialSession) => {
       autoSync: (sessionData as any).autoSync ?? false,
       syncFilters: (sessionData as any).syncFilters ?? ''
     } as Session
+    console.log("新增会话：", newSession);
     addSession(newSession).then((resp) => {
       console.log(resp);
       sessions.value.push(newSession)
-      selected.value = newSession
       newSessionData.value = null
       router.push({ name: 'SessionDetail', params: { id: newSession.id } })
+    }).catch((error) => {
+      console.error('Error adding session:', error)
     });
   }
 }
@@ -166,6 +168,14 @@ const loadSessions = () => {
     }
   })
 }
+
+// 提供删除方法给子路由页面调用（如 SessionDetailPage）
+const removeSessionById = (id: number) => {
+  const idx = sessions.value.findIndex(s => s.id === id)
+  if (idx !== -1) sessions.value.splice(idx, 1)
+  if (selected.value?.id === id) selected.value = null
+}
+provide('removeSessionById', removeSessionById)
 
 loadSessions()
 </script>
