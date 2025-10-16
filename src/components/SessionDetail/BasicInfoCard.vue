@@ -14,7 +14,7 @@
       </div>
       <div class="info-item">
         <span class="info-label">昵称</span>
-        <span class="info-value">{{ session.wx_name }}</span>
+        <span class="info-value">{{ session.wx_acct_name }}</span>
       </div>
       <div class="info-item">
         <span class="info-label">邮箱</span>
@@ -30,10 +30,10 @@
 
 <script setup lang="ts">
 import { NCard, NIcon } from 'naive-ui';
-import type { SessionData } from '../Session/SessionSidebar.vue';
+import type { Session } from '@/models/session';
 
 defineProps<{
-  session: SessionData;
+  session: Session;
 }>();
 </script>
 

@@ -2,25 +2,13 @@
   <div class="content-wrapper">
     <div class="new-session-preview">
       <div class="preview-header">
-        <n-icon size="32" color="#ffffff">
-          <svg viewBox="0 0 24 24" fill="currentColor">
-            <path d="M12.04 2C6.58 2 2.13 6.45 2.13 11.91C2.13 13.66 2.59 15.36 3.45 16.86L2.05 22L7.3 20.62C8.75 21.41 10.38 21.83 12.04 21.83C17.5 21.83 21.95 17.38 21.95 11.92C21.95 6.45 17.5 2 12.04 2ZM12.05 20.15C10.59 20.15 9.15 19.75 7.89 19L7.55 18.83L4.42 19.65L5.25 16.61L5.06 16.26C4.24 14.96 3.81 13.47 3.81 11.91C3.81 7.37 7.49 3.69 12.04 3.69C16.58 3.69 20.26 7.37 20.26 11.91C20.26 16.45 16.58 20.15 12.05 20.15Z"/>
-          </svg>
-        </n-icon>
         <h2>发现新的微信账号</h2>
         <p>请确认并编辑信息，添加此微信账号到同步列表</p>
       </div>
       
       <div class="preview-content">
         <div class="preview-avatar">
-          <n-avatar
-            :size="80"
-            :src="editable.avatar"
-            :fallback-src="getDefaultAvatar(editable.wx_name)"
-            round
-          >
-            {{ editable.wx_name ? editable.wx_name.charAt(0) : 'U' }}
-          </n-avatar>
+          <img :src="avatarSrc"/>
         </div>
         
         <div class="form-wrapper">
@@ -45,8 +33,8 @@
                 <n-form-item label="微信ID" path="wx_id">
                   <n-input v-model:value="editable.wx_id" placeholder="wxid_xxx 或账号名" />
                 </n-form-item>
-                <n-form-item label="昵称" path="wx_name">
-                  <n-input v-model:value="editable.wx_name" placeholder="微信昵称" />
+                <n-form-item label="昵称" path="wx_acct_name">
+                  <n-input v-model:value="editable.wx_acct_name" placeholder="微信昵称" />
                 </n-form-item>
                 <n-form-item label="手机号">
                   <n-input v-model:value="editable.wx_mobile" placeholder="手机号（可选）" />
@@ -92,8 +80,8 @@
             <div class="section">
               <div class="section-title">密钥信息</div>
               <div class="grid one">
-                <n-form-item label="Data Key" path="data_key">
-                  <n-input v-model:value="editable.data_key" placeholder="数据密钥（hex）" />
+                <n-form-item label="Data Key" path="wx_key">
+                  <n-input v-model:value="editable.wx_key" placeholder="数据密钥（hex）" />
                 </n-form-item>
                 <n-form-item label="AES Key" path="aes_key">
                   <n-input v-model:value="editable.aes_key" placeholder="图片密钥（hex）" />
@@ -123,56 +111,36 @@
 </template>
 
 <script setup lang="ts">
-import { reactive, watch, ref } from 'vue'
-import { NAvatar, NButton, NIcon, NSpace, NForm, NFormItem, NInput, NSelect } from 'naive-ui'
+import { reactive, watch, ref, computed } from 'vue'
+import { NButton, NSpace, NForm, NFormItem, NInput, NSelect } from 'naive-ui'
 import type { FormInst, FormRules } from 'naive-ui'
-
-interface SessionData {
-  id?: number
-  name: string
-  desc: string
-  wx_id: string
-  wx_name: string
-  wx_mobile: string
-  wx_email: string
-  wx_dir: string
-  avatar: string
-  online: boolean
-  lastActive: string
-  data_key: string
-  aes_key: string
-  xor_key: string
-  autoSync: boolean
-  syncFilters: string
-  client_type: string
-  client_version: string
-}
+import { convertFileSrc } from '@tauri-apps/api/core';
+import type { PartialSession } from '@/models/session'
 
 interface Props {
-  sessionData: Partial<SessionData>
+  sessionData: PartialSession
 }
 
 interface Emits {
-  (e: 'confirm', data: SessionData): void
+  (e: 'confirm', data: PartialSession): void
   (e: 'cancel'): void
 }
 
 const props = defineProps<Props>()
 const emit = defineEmits<Emits>()
 
-const defaults: SessionData = {
-  id: undefined,
+const defaults: PartialSession = {
   name: '',
   desc: '',
   wx_id: '',
-  wx_name: '',
+  wx_acct_name: '',
   wx_mobile: '',
   wx_email: '',
   wx_dir: '',
   avatar: '',
   online: true,
   lastActive: '刚刚',
-  data_key: '',
+  wx_key: '',
   aes_key: '',
   xor_key: '',
   autoSync: false,
@@ -181,7 +149,7 @@ const defaults: SessionData = {
   client_version: ''
 }
 
-const editable = reactive<SessionData>({ ...defaults })
+const editable = reactive<PartialSession>({ ...defaults })
 
 const clientTypeOptions = [
   { label: 'Windows', value: 'win' },
@@ -208,7 +176,7 @@ const rules: FormRules = {
       trigger: ['input', 'blur']
     }
   ],
-  wx_name: [
+  wx_acct_name: [
     {
       required: true,
       validator: (_rule, value: string) => !!(value && String(value).trim().length) || new Error('昵称不能为空'),
@@ -236,7 +204,7 @@ const rules: FormRules = {
       trigger: ['input', 'blur']
     }
   ],
-  data_key: [
+  wx_key: [
     {
       required: true,
       validator: (_rule, value: string) => !!(value && String(value).trim().length) || new Error('Data Key 不能为空'),
@@ -262,7 +230,11 @@ const rules: FormRules = {
 watch(
   () => props.sessionData,
   (val) => {
-    Object.assign(editable, { ...defaults, ...(val || {}) })
+    const incoming = { ...(val || {}) } as any
+    // legacy -> new mapping
+    if (!incoming.wx_acct_name && incoming.wx_name) incoming.wx_acct_name = incoming.wx_name
+    if (!incoming.wx_key && incoming.data_key) incoming.wx_key = incoming.data_key
+    Object.assign(editable, { ...defaults, ...incoming })
   },
   { immediate: true }
 )
@@ -270,6 +242,21 @@ watch(
 const getDefaultAvatar = (name: string) => {
   return `https://ui-avatars.com/api/?name=${encodeURIComponent(name || 'U')}&background=random&size=128`
 }
+
+const getAvatarSrc = (src: string) => {
+  if (!src) return ''
+  if (/^(https?:|data:|asset:|tauri:)/i.test(src)) return src
+  if (/^[a-zA-Z]:[\\/]/.test(src) || src.startsWith('\\\\') || src.startsWith('\\\\?\\') || src.startsWith('/')) {
+    try { return convertFileSrc(src) } catch { return src }
+  }
+  return src
+}
+
+const avatarSrc = computed(() => {
+  const src = editable.avatar || ''
+  const name = (editable.wx_acct_name as string) || (editable.wx_name as string) || (editable.name as string) || 'U'
+  return src ? getAvatarSrc(src) : getDefaultAvatar(name)
+})
 
 const handleConfirm = () => {
   formRef.value?.validate((errors) => {
@@ -336,6 +323,13 @@ export default defineComponent({
 
 .preview-avatar {
   text-align: center;
+  img {
+    width: 90px;
+    height: 90px;
+    border-radius: 50%;
+    object-fit: cover;
+    border: 2px solid #e7e7e7;
+  }
 }
 
 .form-wrapper {

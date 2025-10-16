@@ -22,10 +22,10 @@
 
 <script setup lang="ts">
 import { NCard, NIcon } from 'naive-ui';
-import type { SessionData } from '../Session/SessionSidebar.vue';
+import type { Session } from '@/models/session';
 
 defineProps<{
-  session: SessionData;
+  session: Session;
 }>();
 </script>
 

@@ -4,11 +4,11 @@
       <n-avatar
         :size="80"
         :src="session.avatar"
-        :fallback-src="getDefaultAvatar(session.wx_name)"
+        :fallback-src="getDefaultAvatar(session.wx_acct_name)"
         round
         class="user-main-avatar"
       >
-        {{ session.wx_name ? session.wx_name.charAt(0) : 'U' }}
+        {{ session.wx_acct_name ? session.wx_acct_name.charAt(0) : 'U' }}
       </n-avatar>
       <div class="user-basic-info">
         <h2 class="user-title">{{ session.name }}</h2>
@@ -24,7 +24,7 @@
             </template>
             在线
           </n-tag>
-          <n-tag type="info" size="small" round>{{ session.wx_name }}</n-tag>
+          <n-tag type="info" size="small" round>{{ session.wx_acct_name }}</n-tag>
         </div>
         
         <!-- 自动同步开关 -->
@@ -54,18 +54,18 @@
 
 <script setup lang="ts">
 import { NAvatar, NTag, NIcon, NSwitch } from 'naive-ui';
-import type { SessionData } from '../Session/SessionSidebar.vue';
+import type { Session } from '@/models/session';
 
 defineProps<{
-  session: SessionData;
+  session: Session;
 }>();
 
 defineEmits<{
   toggleAutoSync: [];
 }>();
 
-const getDefaultAvatar = (name: string) => {
-  return `https://ui-avatars.com/api/?name=${encodeURIComponent(name)}&background=random&size=128`
+const getDefaultAvatar = (name?: string) => {
+  return `https://ui-avatars.com/api/?name=${encodeURIComponent(name || 'U')}&background=random&size=128`
 }
 </script>
 

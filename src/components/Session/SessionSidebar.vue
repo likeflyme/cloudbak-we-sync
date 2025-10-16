@@ -8,6 +8,7 @@
       </n-icon>
       <span class="sidebar-title">we-sync</span>
       <div class="flex-grow"></div>
+      <!-- Removed header logout button -->
       <n-button
         size="small"
         type="primary"
@@ -33,65 +34,105 @@
         @click="$emit('selectSession', s)"
       >
         <div class="session-avatar">
-          <n-avatar
-            size="large"
-            :src="s.avatar"
-            :fallback-src="getDefaultAvatar(s.wx_name)"
-            round
-          >
-            {{ s.wx_name ? s.wx_name.charAt(0) : 'U' }}
-          </n-avatar>
-          <div class="session-status" :class="s.online ? 'online' : 'offline'"></div>
+           <img :src="`${host}/api/resources/relative-resource?relative_path=${s.wx_id}/head_image/${s.wx_id}.jpg&session_id=${s.id}`"/>
         </div>
         
         <div class="session-info">
           <div class="session-name">{{ s.name }}</div>
           <div class="session-desc">{{ s.desc }}</div>
           <div class="session-meta">
-            <n-tag size="small" type="success" round>{{ s.wx_name }}</n-tag>
+            <n-tag size="small" type="success" round>{{ s.wx_acct_name || s.wx_name }}</n-tag>
             <span class="session-time">{{ s.lastActive }}</span>
           </div>
         </div>
       </div>
     </div>
+
+    <!-- Bottom logout area -->
+    <div class="sidebar-footer">
+      <n-button quaternary type="error" block @click="$emit('logout')">
+        <template #icon>
+          <n-icon>
+            <svg viewBox="0 0 24 24" fill="currentColor">
+              <!-- logout/exit icon -->
+              <path d="M14.08 15.59L16.67 13H7V11H16.67L14.08 8.41L15.5 7L20.5 12L15.5 17L14.08 15.59Z"/>
+              <path d="M3 5H11V7H5V17H11V19H3V5Z"/>
+            </svg>
+          </n-icon>
+        </template>
+        退出登录
+      </n-button>
+    </div>
   </n-layout-sider>
 </template>
 
 <script setup lang="ts">
-import { NLayoutSider, NIcon, NButton, NAvatar, NTag } from 'naive-ui';
+import { NLayoutSider, NIcon, NButton, NTag } from 'naive-ui';
+import { ref, onMounted, watch } from 'vue';
+import { invoke, convertFileSrc } from '@tauri-apps/api/core';
+import { endpoint } from '@/common/login';
+import type { Session } from '@/models/session';
 
-export interface SessionData {
-  id: number;
-  name: string;
-  desc: string;
-  wx_id: string;
-  wx_name: string;
-  wx_mobile: string;
-  wx_email: string;
-  wx_dir: string;
-  avatar: string;
-  online: boolean;
-  lastActive: string;
-  data_key: string;
-  aes_key: string;
-  xor_key: string;
-  autoSync: boolean;
-  syncFilters: string;
-}
+const host = endpoint();
 
-defineProps<{
-  sessions: SessionData[];
+const props = defineProps<{
+  sessions: Session[];
   selectedId?: number;
 }>();
 
 defineEmits<{
-  selectSession: [session: SessionData];
+  selectSession: [session: Session];
   addSession: [];
+  logout: [];
 }>();
 
-const getDefaultAvatar = (name: string) => {
-  return `https://ui-avatars.com/api/?name=${encodeURIComponent(name)}&background=random&size=128`
+const stripLongPathPrefix = (p: string) => p.replace(/^\\\\\?\\/, '');
+const isLocalPath = (p: string) => /^[a-zA-Z]:[\\/]/.test(p) || p.startsWith('\\\\') || p.startsWith('/');
+
+
+// Map of resolved avatar strings keyed by session id
+const resolvedAvatars = ref<Record<number, string>>({});
+
+const resolveAvatar = async (src: string): Promise<string> => {
+  if (!src) return ''
+  // handle url-like sources
+  if (/^(https?:|data:|asset:|tauri:|file:)/i.test(src)) {
+    if (/^file:\/\//i.test(src)) {
+      const path = src.replace(/^file:\/\//i, '')
+      try { return convertFileSrc(stripLongPathPrefix(path)) } catch { return src }
+    }
+    return src
+  }
+  // handle plain local paths
+  if (isLocalPath(src)) {
+    try {
+      return await invoke<string>('load_avatar', { path: stripLongPathPrefix(src) })
+    } catch { return src }
+  }
+  console.log('resolve avatar', src);
+  return src
 }
+
+onMounted(() => {
+  props.sessions.forEach(async (s) => {
+    const resolved = await resolveAvatar(s.avatar)
+    if (resolved) {
+      resolvedAvatars.value[s.id] = resolved
+    }
+  })
+});
+
+// If sessions list changes, resolve avatars (and update when avatar path changes)
+watch(
+  () => props.sessions.map(s => ({ id: s.id, avatar: s.avatar })),
+  async (list) => {
+    for (const { id, avatar } of list) {
+      const resolved = await resolveAvatar(avatar)
+      if (resolved) resolvedAvatars.value[id] = resolved
+    }
+  },
+  { deep: true }
+)
 </script>
 
 <style scoped>
@@ -100,6 +141,9 @@ const getDefaultAvatar = (name: string) => {
   background: #ffffff;
   box-shadow: 2px 0 8px rgba(0, 0, 0, 0.1);
   border: none !important;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
 }
 
 .sidebar-header {
@@ -134,8 +178,15 @@ const getDefaultAvatar = (name: string) => {
 
 .session-list {
   padding: 0;
-  max-height: calc(100vh - 70px);
   overflow-y: auto;
+  background: #ffffff;
+  flex: 1 1 auto;
+}
+
+/* Bottom footer */
+.sidebar-footer {
+  padding: 12px 12px 16px;
+  border-top: 1px solid #e7e7e7;
   background: #ffffff;
 }
 
@@ -175,6 +226,12 @@ const getDefaultAvatar = (name: string) => {
 .session-avatar {
   position: relative;
   flex-shrink: 0;
+  img {
+    width: 48px;
+    height: 48px;
+    border-radius: 6px;
+    object-fit: cover;
+  }
 }
 
 .session-status {

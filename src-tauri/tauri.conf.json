@@ -18,7 +18,15 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": null,
+      "assetProtocol": {
+        "enable": true,
+        "scope": [
+          "$HOME/.we-sync/avatars/**",
+          "$APPDATA/.we-sync/avatars/**",
+          "$APPLOCALDATA/.we-sync/avatars/**"
+        ]
+      }
     }
   },
   "bundle": {

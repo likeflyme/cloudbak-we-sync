@@ -15,7 +15,7 @@
             <n-button
               size="small"
               text
-              @click="$emit('copyKey', keyVisibility.data_key ? session.data_key : maskKey(session.data_key))"
+              @click="$emit('copyKey', keyVisibility.data_key ? (session.data_key || session.wx_key) : maskKey(session.data_key || session.wx_key))"
               class="key-action-btn"
               title="复制密钥"
             >
@@ -48,7 +48,7 @@
           </div>
         </div>
         <div class="key-value">
-          {{ keyVisibility.data_key ? session.data_key : maskKey(session.data_key) }}
+          {{ keyVisibility.data_key ? (session.data_key || session.wx_key) : maskKey(session.data_key || session.wx_key) }}
         </div>
       </div>
       
@@ -144,20 +144,17 @@
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue';
 import { NCard, NIcon, NButton } from 'naive-ui';
-import type { SessionData } from '../Session/SessionSidebar.vue';
+import type { Session } from '@/models/session';
 
 defineProps<{
-  session: SessionData;
+  session: Session;
+  keyVisibility: {
+    data_key: boolean;
+    aes_key: boolean;
+    xor_key: boolean;
+  };
 }>();
-
-// 密钥显示状态
-const keyVisibility = ref({
-  data_key: false,
-  aes_key: false,
-  xor_key: false
-});
 
 // 脱敏显示密钥
 const maskKey = (key: string) => {

@@ -18,7 +18,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = ["config-json5"] }
 
 [dependencies]
-tauri = { version = "2", features = ["config-json5"] }
+tauri = { version = "2", features = ["protocol-asset", "config-json5"] }
 tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -36,6 +36,11 @@ block-padding = "0.3"
 subtle = "2.5"
 memchr = { version = "2.7", features = ["use_std"] }
 rayon = "1.10"
+# Added for avatar decryption & DB access
+cbc = "0.1"
+rusqlite = { version = "0.31", features = ["bundled"] }
+base64 = "0.22"
+tauri-plugin-http = "2"
 
 # windows api (CNG + Registry + FileSystem + SystemInformation)
 windows = { version = "0.58", features = [
