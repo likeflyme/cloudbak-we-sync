@@ -1,12 +1,6 @@
 <template>
   <n-card title="密钥信息" class="info-card">
-    <template #header-extra>
-      <n-icon size="20" color="#07c160">
-        <svg viewBox="0 0 24 24" fill="currentColor">
-          <path d="M7,14A3,3 0 0,0 10,17A3,3 0 0,0 13,14A3,3 0 0,0 10,11A3,3 0 0,0 7,14M12.65,10A1,1 0 0,1 13.65,11L20.31,4.27L21.72,5.68L15.04,12.36C15.65,13.05 16,13.97 16,15A5,5 0 0,1 11,20A5,5 0 0,1 6,15A5,5 0 0,1 11,10C12.03,10 12.95,10.35 13.65,11L14.46,10.18L4.27,21.72L2.86,20.31L12.54,10.63C12.58,10.57 12.62,10.5 12.65,10Z"/>
-        </svg>
-      </n-icon>
-    </template>
+    
     <div class="key-info">
       <div class="key-item">
         <div class="key-header">
@@ -115,28 +109,10 @@
                 </n-icon>
               </template>
             </n-button>
-            <n-button
-              size="small"
-              text
-              @click="$emit('toggleKeyVisibility', 'xor_key')"
-              class="key-action-btn"
-            >
-              <template #icon>
-                <n-icon>
-                  <svg v-if="!keyVisibility.xor_key" viewBox="0 0 24 24" fill="currentColor">
-                    <path d="M12,9A3,3 0 0,0 9,12A3,3 0 0,0 12,15A3,3 0 0,0 15,12A3,3 0 0,0 12,9M12,17A5,5 0 0,1 7,12A5,5 0 0,1 12,7A5,5 0 0,1 17,12A5,5 0 0,1 12,17M12,4.5C7,4.5 2.73,7.61 1,12C2.73,16.39 7,19.5 12,19.5C17,19.5 21.27,16.39 23,12C21.27,7.61 17,4.5 12,4.5Z"/>
-                  </svg>
-                  <svg v-else viewBox="0 0 24 24" fill="currentColor">
-                    <path d="M11.83,9L15,12.16C15,12.11 15,12.05 15,12A3,3 0 0,0 12,9C11.94,9 11.89,9 11.83,9M7.53,9.8L9.08,11.35C9.03,11.56 9,11.77 9,12A3,3 0 0,0 12,15C12.22,15 12.44,14.97 12.65,14.92L14.2,16.47C13.53,16.8 12.79,17 12,17A5,5 0 0,1 7,12C7,11.21 7.2,10.47 7.53,9.8M2,4.27L4.28,6.55L4.73,7C3.08,8.3 1.78,10 1,12C2.73,16.39 7,19.5 12,19.5C13.55,19.5 15.03,19.2 16.38,18.66L16.81,19.09L19.73,22L21,20.73L3.27,3M12,7A5,5 0 0,1 17,12C17,12.64 16.87,13.26 16.64,13.82L19.57,16.75C21.07,15.5 22.27,13.86 23,12C21.27,7.61 17,4.5 12,4.5C10.6,4.5 9.26,4.75 8,5.2L10.17,7.35C10.76,7.13 11.37,7 12,7Z"/>
-                  </svg>
-                </n-icon>
-              </template>
-              {{ keyVisibility.xor_key ? '隐藏' : '查看' }}
-            </n-button>
           </div>
         </div>
         <div class="key-value">
-          {{ keyVisibility.xor_key ? session.xor_key : maskKey(session.xor_key) }}
+          {{ session.xor_key }}
         </div>
       </div>
     </div>
@@ -147,7 +123,7 @@
 import { NCard, NIcon, NButton } from 'naive-ui';
 import type { Session } from '@/models/session';
 
-defineProps<{
+const props = defineProps<{
   session: Session;
   keyVisibility: {
     data_key: boolean;

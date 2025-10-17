@@ -41,6 +41,11 @@ cbc = "0.1"
 rusqlite = { version = "0.31", features = ["bundled"] }
 base64 = "0.22"
 tauri-plugin-http = "2"
+# new for sync (blocking reqwest in dedicated thread)
+reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls", "blocking"] }
+once_cell = "1.19"
+parking_lot = "0.12"
+notify = "6"
 
 # windows api (CNG + Registry + FileSystem + SystemInformation)
 windows = { version = "0.58", features = [

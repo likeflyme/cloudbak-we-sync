@@ -106,17 +106,8 @@ fn trimmed_username(wx_id: &str) -> String {
 }
 
 fn app_data_dir() -> Result<PathBuf> {
-    #[cfg(target_os = "windows")]
-    {
-        if let Some(home) = std::env::var_os("USERPROFILE") { return Ok(PathBuf::from(home).join(".we-sync")); }
-        if let Some(home) = std::env::var_os("HOMEPATH") { return Ok(PathBuf::from(home).join(".we-sync")); }
-        Err(anyhow!("cannot resolve USERPROFILE"))
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        if let Some(home) = dirs_next::home_dir() { return Ok(home.join(".we-sync")); }
-        Err(anyhow!("cannot resolve home_dir"))
-    }
+    // delegate to shared utility so all modules use the same root
+    crate::internal::app_paths::app_data_dir()
 }
 
 pub fn extract_avatar_to_appdata(data_dir: &str, data_key_hex: &str, wx_id: &str) -> Option<String> {

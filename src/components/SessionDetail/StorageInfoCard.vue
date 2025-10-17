@@ -1,11 +1,7 @@
 <template>
-  <n-card title="存储位置" class="info-card">
+  <n-card title="微信数据目录" class="info-card">
     <template #header-extra>
-      <n-icon size="20" color="#07c160">
-        <svg viewBox="0 0 24 24" fill="currentColor">
-          <path d="M9.5 3A6.5 6.5 0 0 1 16 9.5C16 11.11 15.41 12.59 14.44 13.73L14.71 14H15.5L20.5 19L19 20.5L14 15.5V14.71L13.73 14.44C12.59 15.41 11.11 16 9.5 16A6.5 6.5 0 0 1 3 9.5A6.5 6.5 0 0 1 9.5 3M9.5 5C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5Z"/>
-        </svg>
-      </n-icon>
+      <n-button size="small" type="primary" secondary @click="openDir">打开目录</n-button>
     </template>
     <div class="storage-info">
       <div class="storage-path">
@@ -21,12 +17,25 @@
 </template>
 
 <script setup lang="ts">
-import { NCard, NIcon } from 'naive-ui';
+import { NCard, NIcon, NButton } from 'naive-ui';
 import type { Session } from '@/models/session';
+import { invoke } from '@tauri-apps/api/core'
 
-defineProps<{
+const props = defineProps<{
   session: Session;
 }>();
+
+const stripLongPathPrefix = (p: string) => p.replace(/^\\\\\?\\/, '');
+
+const openDir = async () => {
+  if (!props.session?.wx_dir) return;
+  try {
+    const p = stripLongPathPrefix(props.session.wx_dir);
+    await invoke('open_in_os', { path: p, reveal: false })
+  } catch (e) {
+    console.error('open dir failed', e);
+  }
+}
 </script>
 
 <style scoped>
@@ -60,6 +69,12 @@ defineProps<{
   color: #333333;
   word-break: break-all;
   border: 1px solid #eeeeee;
+}
+
+.storage-actions {
+  margin-top: 10px;
+  display: flex;
+  justify-content: flex-end;
 }
 
 /* 卡片标题样式 */

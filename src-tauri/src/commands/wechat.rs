@@ -1,4 +1,3 @@
-
 // New: expose a command to extract WeChat v4 keys on Windows
 #[tauri::command]
 #[cfg(target_os = "windows")]
@@ -80,6 +79,7 @@ pub async fn extract_wechat_keys(_data_dir: Option<String>) -> Result<serde_json
 
 #[tauri::command]
 pub fn load_avatar(path: String) -> Result<String, String> {
+    use base64::Engine; // bring trait into scope for encode()
     fn detect_mime(bytes: &[u8], path: &str) -> &'static str {
         let lower = path.to_lowercase();
         if lower.ends_with(".png") {
@@ -105,5 +105,6 @@ pub fn load_avatar(path: String) -> Result<String, String> {
 
     let data = std::fs::read(&path).map_err(|e| e.to_string())?;
     let mime = detect_mime(&data, &path);
-    Ok(format!("data:{};base64,{}", mime, base64::encode(data)))
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&data);
+    Ok(format!("data:{};base64,{}", mime, b64))
 }

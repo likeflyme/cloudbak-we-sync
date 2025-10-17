@@ -1,6 +1,6 @@
 use anyhow::{anyhow, Result};
-use super::winproc::WeChatProcess;
-use super::validator::{DBValidator, ImgKeyValidator};
+use crate::internal::windows::winproc::WeChatProcess;
+use crate::internal::windows::validator::{DBValidator, ImgKeyValidator};
 use rayon::prelude::*;
 
 #[cfg(target_os = "windows")]
@@ -53,10 +53,10 @@ pub fn extract_keys_windows(proc: &WeChatProcess) -> Result<(Option<String>, Opt
     }
 
     // Prepare validators
-    let db_validator = if let Some(dir) = proc.data_dir.as_deref() {
+    let db_validator: Option<DBValidator> = if let Some(dir) = proc.data_dir.as_deref() {
         match DBValidator::new(dir) { Ok(v) => { println!("[dbg] DBValidator initialized"); Some(v) }, Err(e) => { println!("[dbg] DBValidator init failed: {}", e); None } }
     } else { None };
-    let img_validator = if let Some(dir) = proc.data_dir.as_deref() {
+    let img_validator: Option<ImgKeyValidator> = if let Some(dir) = proc.data_dir.as_deref() {
         match ImgKeyValidator::new(dir) { Ok(v) => { println!("[dbg] ImgKeyValidator initialized"); Some(v) }, Err(e) => { println!("[dbg] ImgKeyValidator init failed: {}", e); None } }
     } else { None };
 
@@ -87,7 +87,8 @@ pub fn extract_keys_windows(proc: &WeChatProcess) -> Result<(Option<String>, Opt
     const DATA_PAT: &[u8] = b"\x20fts5(%\x00"; // 0x20 'f' 't' 's' '5' '(' '%' 0x00
     const DATA_OFFSETS: [isize; 3] = [16, -80, 64];
     static ZERO16: [u8; 16] = [0u8; 16];
-    const IMG_FALLBACK_OFFSETS: [isize; 2] = [-48, -32]; // try both -48 and -32
+    // Broaden offsets around 16 zero bytes signature; many builds place the AES key nearby
+    const IMG_FALLBACK_OFFSETS: [isize; 9] = [-128, -96, -80, -64, -48, -32, -24, -20, -16];
 
     unsafe {
         let h = OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_INFORMATION, BOOL(0), proc.pid as u32)?;
@@ -103,11 +104,11 @@ pub fn extract_keys_windows(proc: &WeChatProcess) -> Result<(Option<String>, Opt
         let mut seen_img: std::collections::HashSet<[u8; 16]> = HashSet::new();
 
         let mut regions_processed = 0usize;
-        const MAX_CHUNK: usize = 64 * 1024 * 1024;
-        const MAX_REGION_CHUNKS: usize = 3; // process up to 3 chunks per region
-        const MAX_REGIONS: usize = 500; // increase for robustness
-        const MAX_CAND_DB: usize = 2000; // stop scanning early if enough candidates
-        const MAX_CAND_IMG: usize = 5000;  // allow more image candidates so we don't miss
+        const MAX_CHUNK: usize = 96 * 1024 * 1024; // increase chunk size
+        const MAX_REGION_CHUNKS: usize = 4; // process more per region
+        const MAX_REGIONS: usize = 1200; // scan more regions, include small heaps
+        const MAX_CAND_DB: usize = 6000; // collect more candidates
+        const MAX_CAND_IMG: usize = 60000;  // allow far more image candidates
 
         // Immediate image key result (pointer-verified), like Python
         let mut img_hex_inline: Option<String> = None;
@@ -121,7 +122,7 @@ pub fn extract_keys_windows(proc: &WeChatProcess) -> Result<(Option<String>, Opt
             let state = mbi.State;
             let protect = mbi.Protect;
             let memtype = mbi.Type;
-            if size >= 1024*1024 && size <= 512*1024*1024 && state == MEM_COMMIT && is_readable(protect.0) && is_acceptable_type(memtype.0) {
+            if size >= 64*1024 && size <= 512*1024*1024 && state == MEM_COMMIT && is_readable(protect.0) && is_acceptable_type(memtype.0) {
                 let total_to_scan = std::cmp::min(size, MAX_CHUNK * MAX_REGION_CHUNKS);
                 println!("[dbg] region base=0x{:x} size={} prot=0x{:x} type=0x{:x} scanning={}", base, size, protect.0, memtype.0, total_to_scan);
                 let mut offset = 0usize;
@@ -268,7 +269,11 @@ pub fn extract_keys_windows(proc: &WeChatProcess) -> Result<(Option<String>, Opt
                 img_hex_inline
             } else {
                 // try pointer-based candidates collected (first and last 16)
-                cand_img.iter().find_map(|k16| if iv.validate_img_key(k16) { Some(hex::encode(k16)) } else { None })
+                let found = cand_img.iter().find_map(|k16| if iv.validate_img_key(k16) { Some(hex::encode(k16)) } else { None });
+                if found.is_none() {
+                    println!("[dbg] ImgKey validation failed over {} candidates", cand_img.len());
+                }
+                found
             }
         } else { None };
 

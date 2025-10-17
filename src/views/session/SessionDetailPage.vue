@@ -15,6 +15,30 @@
           @sync="handleSync"
           @delete="deleteSession"
         />
+
+        <!-- Sync status panel -->
+        <div class="sync-status" v-if="syncStatus.state !== 'idle'">
+          <n-space align="center" justify="space-between">
+            <div class="status-text">
+              <n-alert :type="statusType" :title="statusTitle" :show-icon="true" class="status-alert">
+                <div>
+                  <div v-if="syncStatus.message">{{ syncStatus.message }}</div>
+                  <div class="stats">
+                    <span>扫描: {{ syncStatus.scanned }}</span>
+                    <span>待传: {{ syncStatus.to_upload }}</span>
+                    <span>已传: {{ syncStatus.uploaded }}</span>
+                    <span>跳过: {{ syncStatus.skipped }}</span>
+                    <span>失败: {{ syncStatus.failed }}</span>
+                    <span v-if="syncStatus.current">当前: {{ syncStatus.current }}</span>
+                  </div>
+                </div>
+              </n-alert>
+            </div>
+            <div>
+              <n-button v-if="isRunning" type="warning" @click="stopSync">停止同步</n-button>
+            </div>
+          </n-space>
+        </div>
       </template>
       <template v-else>
         <EmptyState />
@@ -24,15 +48,16 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, watch, inject } from 'vue'
+import { ref, onMounted, watch, inject, computed, onUnmounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { NLayoutContent } from 'naive-ui'
+import { NLayoutContent, NAlert, NButton, NSpace, createDiscreteApi } from 'naive-ui'
 import LoadingState from '@/components/SessionDetail/LoadingState.vue'
 import EmptyState from '@/components/SessionDetail/EmptyState.vue'
 import SessionDetail from '@/views/session/SessionDetail.vue'
-import { getSessions } from '@/api/user'
 import type { Session } from '@/models/session'
 import { deleteSession as deleteSessionFromServer } from '@/api/user'
+import { invoke } from '@tauri-apps/api/core'
+import { endpoint, token as getToken } from '@/common/login'
 
 const route = useRoute()
 const router = useRouter()
@@ -43,6 +68,67 @@ const keyVisibility = ref({
   aes_key: false,
   xor_key: false
 })
+
+const { message } = createDiscreteApi(['message'])
+
+// get session by id from parent (Home.vue)
+const getSessionById = inject<(id: number) => Session | null | undefined>('getSessionById')
+
+// sync states
+const syncing = ref(false)
+const taskId = ref<string | null>(null)
+const syncStatus = ref<{ state: string; scanned: number; to_upload: number; uploaded: number; skipped: number; failed: number; current?: string; message?: string}>({
+  state: 'idle', scanned: 0, to_upload: 0, uploaded: 0, skipped: 0, failed: 0
+})
+let pollTimer: number | null = null
+
+const isRunning = computed(() => syncStatus.value.state === 'running')
+const statusType = computed(() => {
+  switch (syncStatus.value.state) {
+    case 'running': return 'info'
+    case 'done': return 'success'
+    case 'stopped': return 'warning'
+    case 'error': return 'error'
+    default: return 'default'
+  }
+})
+const statusTitle = computed(() => {
+  switch (syncStatus.value.state) {
+    case 'running': return '正在同步'
+    case 'done': return '同步完成'
+    case 'stopped': return '已停止'
+    case 'error': return '同步出错'
+    default: return '同步状态'
+  }
+})
+
+const startPolling = () => {
+  stopPolling()
+  pollTimer = window.setInterval(async () => {
+    if (!taskId.value) return
+    try {
+      const st = await invoke<any>('get_sync_status', { taskId: taskId.value })
+      syncStatus.value = st
+      if (st.state === 'done' || st.state === 'stopped' || st.state === 'error') {
+        syncing.value = false
+        stopPolling()
+      }
+    } catch (e) {
+      // stop polling on error
+      stopPolling()
+      syncing.value = false
+    }
+  }, 600)
+}
+
+const stopPolling = () => {
+  if (pollTimer != null) {
+    clearInterval(pollTimer)
+    pollTimer = null
+  }
+}
+
+onUnmounted(stopPolling)
 
 const normalize = (s: any): Session => {
   return {
@@ -63,20 +149,63 @@ const load = async () => {
   session.value = null
   const id = Number(route.params.id)
   try {
-    const list = (await getSessions()) as any[]
-    const found = list.find(s => s.id === id)
+    // resolve from parent-provided list to avoid refetching
+    const found = getSessionById ? getSessionById(id) : null
     session.value = found ? normalize(found) : null
+
+    // fetch and apply local persisted sync filters to override server value
+    if (session.value) {
+      try {
+        const filters = await invoke<string>('get_session_filters', { sessionId: session.value.id })
+        if (typeof filters === 'string' && filters.length > 0) {
+          session.value.syncFilters = filters
+        }
+      } catch (e) {
+        // ignore if not found or error
+      }
+
+      // fetch auto sync state
+      try {
+        const auto = await invoke<boolean>('get_auto_sync_state', { sessionId: session.value.id })
+        session.value.autoSync = !!auto
+      } catch {}
+
+      // persist a snapshot of current session info for convenience
+      try {
+        const { id, name, desc, wx_id, wx_acct_name, wx_mobile, wx_email, wx_dir, avatar, online, lastActive, wx_key, aes_key, xor_key, client_type, client_version } = session.value
+        await invoke('save_session_info', { sessionId: id, info: { id, name, desc, wx_id, wx_acct_name, wx_mobile, wx_email, wx_dir, avatar, online, lastActive, wx_key, aes_key, xor_key, client_type, client_version } })
+      } catch {}
+    }
   } finally {
     loading.value = false
   }
 }
 
 onMounted(load)
-watch(() => route.params.id, load)
+watch(() => route.params.id, () => { stopPolling(); load() })
 
-const toggleAutoSync = () => {
+const toggleAutoSync = async () => {
   if (!session.value) return
-  session.value.autoSync = !session.value.autoSync
+  const s = session.value
+  const enabling = !s.autoSync
+  const baseUrl = endpoint() + '/api'
+  const t = getToken() || undefined
+  if (enabling) {
+    try {
+      await invoke('start_auto_sync', { sysSessionId: s.id, wxDir: s.wx_dir, baseUrl, token: t })
+      s.autoSync = true
+      message.success('已开启自动同步')
+    } catch (e: any) {
+      const msg = e?.message || String(e) || '开启自动同步失败'
+      message.error(msg)
+    }
+  } else {
+    try {
+      await invoke('stop_auto_sync', { sysSessionId: s.id })
+    } catch {}
+    s.autoSync = false
+    message.success('已关闭自动同步')
+  }
 }
 
 const toggleKeyVisibility = (key: 'data_key' | 'aes_key' | 'xor_key') => {
@@ -88,9 +217,35 @@ const updateSyncFilters = (value: string) => {
   session.value.syncFilters = value
 }
 
-const handleSync = (key: string) => {
-  if (!session.value) return
-  console.log('对会话', session.value.id, '执行操作:', key)
+const handleSync = async (key: string) => {
+  if (!session.value || syncing.value) return
+  const full = key === 'full'
+  try {
+    const baseUrl = endpoint() + '/api'
+    const t = getToken() || undefined
+    const id = await invoke<string>('start_sync', {
+      sysSessionId: session.value.id,
+      wxDir: session.value.wx_dir,
+      baseUrl,
+      token: t,
+      full
+    })
+    taskId.value = id
+    syncing.value = true
+    syncStatus.value = { state: 'running', scanned: 0, to_upload: 0, uploaded: 0, skipped: 0, failed: 0 }
+    startPolling()
+  } catch (e) {
+    console.error('start_sync error', e)
+  }
+}
+
+const stopSync = async () => {
+  if (!taskId.value) return
+  try {
+    await invoke('stop_sync', { taskId: taskId.value })
+  } catch (e) {
+    // ignore
+  }
 }
 
 const copyKey = async (key: string) => {
@@ -117,7 +272,10 @@ const deleteSession = () => {
   // TODO: 调用后端删除会话，完成后返回列表
   if (session.value?.id == null) return;
   const id = session.value.id
-  deleteSessionFromServer(id).then(() => {
+  deleteSessionFromServer(id).then(async () => {
+    // 停止此会话的自动同步 & 删除本地会话配置文件
+    try { await invoke('stop_auto_sync', { sysSessionId: id }) } catch {}
+    try { await invoke('delete_session_config', { sessionId: id }) } catch {}
     removeSessionById && removeSessionById(id)
     router.push('/')
   }).catch((error) => {
@@ -128,4 +286,11 @@ const deleteSession = () => {
 
 <style scoped>
 .main-content { background: #f7f7f7; }
+.sync-status {
+  margin: 16px 20px;
+}
+.status-alert {
+  min-width: 520px;
+}
+.stats { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 6px; font-size: 12px; color: #666; }
 </style>

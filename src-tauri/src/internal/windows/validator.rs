@@ -140,42 +140,81 @@ pub struct ImgKeyValidator {
 impl ImgKeyValidator {
     pub fn new(data_dir: &str) -> Result<Self> {
         use walkdir::WalkDir;
+        use std::path::PathBuf;
+
+        fn read_block(path: &Path) -> Option<[u8; 16]> {
+            let mut buf = [0u8; 31];
+            if let Ok(mut f) = std::fs::File::open(path) {
+                use std::io::Read;
+                if f.read_exact(&mut buf).is_ok() && buf.len() >= 31 {
+                    // Both 5632 and 5631 keep the first encrypted block at 15..31
+                    let mut blk = [0u8; 16];
+                    blk.copy_from_slice(&buf[15..31]);
+                    return Some(blk);
+                }
+            }
+            None
+        }
+
         let mut enc: Option<[u8; 16]> = None;
+        let mut picked: Option<PathBuf> = None;
         let mut total_dat = 0usize;
         let mut v631_dat = 0usize;
         let mut v632_dat = 0usize;
+
+        // Collect candidates by priority
+        let mut cand_v632_main: Vec<PathBuf> = Vec::new();
+        let mut cand_v632_thumb: Vec<PathBuf> = Vec::new();
+        let mut cand_v631_main: Vec<PathBuf> = Vec::new();
+        let mut cand_v631_thumb: Vec<PathBuf> = Vec::new();
+
         for e in WalkDir::new(data_dir).into_iter().flatten() {
             if !e.file_type().is_file() { continue; }
             let name_os = e.file_name();
             let name = name_os.to_string_lossy().to_lowercase();
             if !name.ends_with(".dat") { continue; }
-            if name.ends_with("_t.dat") { continue; }
+            let is_thumb = name.ends_with("_t.dat");
             total_dat += 1;
-            // Read only the header + first block (15 + 16)
-            let mut buf = [0u8; 31];
-            let mut read_ok = false;
+
+            // Read small header
+            let mut hdr = [0u8; 4];
             if let Ok(mut f) = std::fs::File::open(e.path()) {
                 use std::io::Read;
-                match f.read_exact(&mut buf) {
-                    Ok(()) => { read_ok = true; }
-                    Err(_) => { /* ignore */ }
-                }
-            }
-            if !read_ok { continue; }
-            // Headers: 07085631 / 07085632
-            if &buf[..4] == b"\x07\x08\x56\x31" { v631_dat += 1; }
-            if &buf[..4] == b"\x07\x08\x56\x32" {
+                if f.read_exact(&mut hdr).is_err() { continue; }
+            } else { continue; }
+
+            if &hdr == b"\x07\x08\x56\x32" {
                 v632_dat += 1;
-                let mut blk = [0u8; 16];
-                blk.copy_from_slice(&buf[15..31]);
-                println!("[dbg] Using img encrypted block from: {}", e.path().to_string_lossy());
-                enc = Some(blk); break;
+                if is_thumb { cand_v632_thumb.push(e.path().to_path_buf()); }
+                else { cand_v632_main.push(e.path().to_path_buf()); }
+            } else if &hdr == b"\x07\x08\x56\x31" {
+                v631_dat += 1;
+                if is_thumb { cand_v631_thumb.push(e.path().to_path_buf()); }
+                else { cand_v631_main.push(e.path().to_path_buf()); }
             }
         }
+
+        // Try in order: v632 main -> v632 thumb -> v631 main -> v631 thumb
+        for lst in [&cand_v632_main, &cand_v632_thumb, &cand_v631_main, &cand_v631_thumb] {
+            if enc.is_some() { break; }
+            for p in lst {
+                if let Some(blk) = read_block(p) {
+                    picked = Some(p.clone());
+                    enc = Some(blk);
+                    break;
+                }
+            }
+        }
+
+        if let Some(p) = &picked {
+            println!("[dbg] Using img encrypted block from: {}", p.to_string_lossy());
+        }
         if enc.is_none() {
-            println!("[dbg] ImgKeyValidator: no V632 .dat found. total .dat={}, v631={}, v632={} (skipping *_t.dat)", total_dat, v631_dat, v632_dat);
+            println!("[dbg] ImgKeyValidator: no .dat block found. total .dat={}, v631={}, v632={}", total_dat, v631_dat, v632_dat);
         } else {
-            println!("[dbg] ImgKeyValidator initialized (v632 candidates seen={}, v631 seen={})", v632_dat, v631_dat);
+            println!("[dbg] ImgKeyValidator initialized (v632={}, v631={}, thumb_used={})",
+                v632_dat, v631_dat, picked.as_ref().map(|pp| pp.file_name().and_then(|n| n.to_str()).map(|n| n.ends_with("_t.dat")).unwrap_or(false)).unwrap_or(false)
+            );
         }
         Ok(Self{ encrypted_block: enc })
     }
@@ -189,6 +228,11 @@ impl ImgKeyValidator {
         let cipher = Aes128::new(k);
         cipher.decrypt_block(&mut blk);
         let dec = blk.as_slice();
-        dec.starts_with(b"\xFF\xD8\xFF") || dec.starts_with(b"wxgf")
+        let ok = dec.starts_with(b"\xFF\xD8\xFF") || dec.starts_with(b"wxgf");
+        if cfg!(debug_assertions) && !ok {
+            // print a small hint without leaking data content
+            println!("[dbg] decrypt miss (first 4) = {:02x?}", &dec[..4]);
+        }
+        ok
     }
 }

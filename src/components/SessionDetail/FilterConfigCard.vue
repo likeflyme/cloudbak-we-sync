@@ -35,26 +35,42 @@
           <span>目录请以 / 结尾：temp/ 表示目录</span>
         </div>
       </div>
+      <div class="filter-actions">
+        <n-button type="primary" size="small" @click="saveFilters">保存过滤配置</n-button>
+      </div>
     </div>
   </n-card>
 </template>
 
 <script setup lang="ts">
-import { NCard, NIcon, NInput } from 'naive-ui'
+import { NCard, NIcon, NInput, NButton, createDiscreteApi } from 'naive-ui'
+import { invoke } from '@tauri-apps/api/core'
 
 interface Props {
   syncFilters: string
+  sessionId: number
 }
 
 interface Emits {
   (e: 'update:syncFilters', value: string): void
 }
 
-defineProps<Props>()
+const props = defineProps<Props>()
 const emit = defineEmits<Emits>()
+const { message } = createDiscreteApi(['message'])
 
 const handleFiltersChange = (value: string) => {
   emit('update:syncFilters', value)
+}
+
+const saveFilters = async () => {
+  try {
+    await invoke('save_session_filters', { sessionId: props.sessionId, syncFilters: props.syncFilters || '' })
+    message.success('已保存过滤配置')
+  } catch (e) {
+    console.warn('save_session_filters failed', e)
+    message.error('保存失败')
+  }
 }
 </script>
 
@@ -91,6 +107,13 @@ const handleFiltersChange = (value: string) => {
 .filter-textarea :deep(.n-input__textarea-el:focus) {
   border-color: #07c160 !important;
   box-shadow: 0 0 0 2px rgba(7, 193, 96, 0.2) !important;
+}
+
+.filter-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 8px;
+  margin-bottom: 16px;
 }
 
 .filter-config-help {

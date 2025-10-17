@@ -26,6 +26,12 @@ const routes: Array<RouteRecordRaw> = [
         name: 'SessionDetail',
         component: SessionDetailPage,
         meta: { loginRequire: true }
+      },
+      {
+        path: 'settings',
+        name: 'Settings',
+        component: () => import('@/views/Settings.vue'),
+        meta: { loginRequire: true }
       }
     ]
   },
