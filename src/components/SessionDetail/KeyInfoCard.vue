@@ -123,7 +123,7 @@
 import { NCard, NIcon, NButton } from 'naive-ui';
 import type { Session } from '@/models/session';
 
-const props = defineProps<{
+defineProps<{
   session: Session;
   keyVisibility: {
     data_key: boolean;

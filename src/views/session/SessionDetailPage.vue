@@ -59,6 +59,8 @@ import { deleteSession as deleteSessionFromServer } from '@/api/user'
 import { invoke } from '@tauri-apps/api/core'
 import { endpoint, token as getToken } from '@/common/login'
 
+const userId = Number(localStorage.getItem('user_id') || '0')
+
 const route = useRoute()
 const router = useRouter()
 const loading = ref(true)
@@ -156,7 +158,7 @@ const load = async () => {
     // fetch and apply local persisted sync filters to override server value
     if (session.value) {
       try {
-        const filters = await invoke<string>('get_session_filters', { sessionId: session.value.id })
+        const filters = await invoke<string>('get_session_filters', { sessionId: session.value.id, userId })
         if (typeof filters === 'string' && filters.length > 0) {
           session.value.syncFilters = filters
         }
@@ -164,16 +166,25 @@ const load = async () => {
         // ignore if not found or error
       }
 
+      // if still empty -> apply default filters and persist
+      if (!session.value.syncFilters) {
+        const defaultFilters = ['cache/', 'temp/', '*.db-shm', '*.db-wal'].join('\n')
+        session.value.syncFilters = defaultFilters
+        try {
+          await invoke('save_session_filters', { sessionId: session.value.id, userId, syncFilters: defaultFilters })
+        } catch {}
+      }
+
       // fetch auto sync state
       try {
-        const auto = await invoke<boolean>('get_auto_sync_state', { sessionId: session.value.id })
+        const auto = await invoke<boolean>('get_auto_sync_state', { sessionId: session.value.id, userId })
         session.value.autoSync = !!auto
       } catch {}
 
       // persist a snapshot of current session info for convenience
       try {
         const { id, name, desc, wx_id, wx_acct_name, wx_mobile, wx_email, wx_dir, avatar, online, lastActive, wx_key, aes_key, xor_key, client_type, client_version } = session.value
-        await invoke('save_session_info', { sessionId: id, info: { id, name, desc, wx_id, wx_acct_name, wx_mobile, wx_email, wx_dir, avatar, online, lastActive, wx_key, aes_key, xor_key, client_type, client_version } })
+        await invoke('save_session_info', { sessionId: id, userId, info: { id, name, desc, wx_id, wx_acct_name, wx_mobile, wx_email, wx_dir, avatar, online, lastActive, wx_key, aes_key, xor_key, client_type, client_version } })
       } catch {}
     }
   } finally {
@@ -192,7 +203,7 @@ const toggleAutoSync = async () => {
   const t = getToken() || undefined
   if (enabling) {
     try {
-      await invoke('start_auto_sync', { sysSessionId: s.id, wxDir: s.wx_dir, baseUrl, token: t })
+      await invoke('start_auto_sync', { sysSessionId: s.id, userId, wxDir: s.wx_dir, baseUrl, token: t })
       s.autoSync = true
       message.success('已开启自动同步')
     } catch (e: any) {
@@ -201,7 +212,7 @@ const toggleAutoSync = async () => {
     }
   } else {
     try {
-      await invoke('stop_auto_sync', { sysSessionId: s.id })
+      await invoke('stop_auto_sync', { sysSessionId: s.id, userId })
     } catch {}
     s.autoSync = false
     message.success('已关闭自动同步')
@@ -225,10 +236,11 @@ const handleSync = async (key: string) => {
     const t = getToken() || undefined
     const id = await invoke<string>('start_sync', {
       sysSessionId: session.value.id,
+      userId,
       wxDir: session.value.wx_dir,
       baseUrl,
       token: t,
-      full
+      full,
     })
     taskId.value = id
     syncing.value = true
@@ -274,8 +286,8 @@ const deleteSession = () => {
   const id = session.value.id
   deleteSessionFromServer(id).then(async () => {
     // 停止此会话的自动同步 & 删除本地会话配置文件
-    try { await invoke('stop_auto_sync', { sysSessionId: id }) } catch {}
-    try { await invoke('delete_session_config', { sessionId: id }) } catch {}
+    try { await invoke('stop_auto_sync', { sysSessionId: id, userId }) } catch {}
+    try { await invoke('delete_session_config', { sessionId: id, userId }) } catch {}
     removeSessionById && removeSessionById(id)
     router.push('/')
   }).catch((error) => {

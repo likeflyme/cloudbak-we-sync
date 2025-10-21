@@ -3,10 +3,6 @@
     <!-- 顶部头部栏（覆盖侧边栏与内容区域） -->
     <n-layout-header class="app-header">
       <div class="left">
-        <img class="logo" src="/vite.svg" alt="logo" />
-        <span class="title">We Sync</span>
-      </div>
-      <div class="right">
         <!-- Add Session button placed left to settings dropdown -->
         <n-button quaternary circle @click="showAddDialog" style="margin-right: 6px;" title="添加会话">
           <template #icon>
@@ -17,18 +13,8 @@
             </n-icon>
           </template>
         </n-button>
-        <!-- Open endpoint in browser -->
-         <!--
-        <n-button quaternary circle @click="openEndpoint" style="margin-right: 8px;" title="打开服务器">
-          <template #icon>
-            <n-icon>
-              <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-                <path d="M14,3H21V10H19V5.41L10.41,14L9,12.59L17.59,4H14V3M5,5H12V7H7V17H17V12H19V19A2,2 0 0,1 17,21H7A2,2 0 0,1 5,19V5Z"/>
-              </svg>
-            </n-icon>
-          </template>
-        </n-button>
-        -->
+      </div>
+      <div class="right">
         <n-dropdown :options="menuOptions" trigger="click" @select="onMenuSelect">
           <n-button quaternary circle>
             <template #icon>
@@ -57,6 +43,7 @@
 
       <!-- 右侧内容区域 -->
       <n-layout-content class="main-content">
+        <!-- 移除更新面板 -->
         <LoadingState v-if="isAddingSession" />
         <NewSessionPreview 
           v-else-if="newSessionData" 
@@ -76,8 +63,12 @@ import { NLayout, NLayoutContent, NLayoutHeader, NButton, NIcon, NDropdown } fro
 import { invoke } from '@tauri-apps/api/core'
 import { removeToken } from '@/common/login'
 import { useRouter } from 'vue-router'
-
 import { getSessions, addSession } from '@/api/user'
+import { token as getToken, endpoint } from '@/common/login'
+// 临时类型声明避免 TS 报错（若 @tauri-apps/plugin-updater 未提供类型）
+// eslint-disable-next-line @typescript-eslint/ban-ts-comment
+// @ts-ignore
+import { check } from '@tauri-apps/plugin-updater'
 
 // 导入组件
 import SessionSidebar from '@/components/Session/SessionSidebar.vue'
@@ -96,41 +87,25 @@ const newSessionData = ref<PartialSession | null>(null)
 
 const menuOptions = [
   { label: '系统设置', key: 'settings' },
+  { label: '检查更新', key: 'update' },
   { label: '退出登录', key: 'logout' }
 ]
 
 const onMenuSelect = (key: string) => {
   if (key === 'settings') {
     router.push({ name: 'Settings' })
+  } else if (key === 'update') {
+    router.push({ name: 'UpdateDetail' })
   } else if (key === 'logout') {
     const ok = window.confirm('确定要退出登录吗？')
     if (!ok) return
     removeToken()
+    try { invoke('clear_auth_context') } catch {}
     router.push('/login')
   }
 }
 
-const openEndpoint = async () => {
-  const url = (localStorage.getItem('endpoint') || '').trim()
-  if (!url) {
-    alert('未配置服务器地址');
-    return;
-  }
-  try {
-    const u = new URL(url)
-    if (!['http:', 'https:'].includes(u.protocol)) throw new Error('invalid')
-    const mod: any = await import('@tauri-apps/plugin-opener')
-    if (mod?.open) {
-      await mod.open(url)
-    } else if (mod?.default) {
-      await mod.default(url)
-    } else {
-      window.open(url, '_blank')
-    }
-  } catch {
-    alert('服务器地址无效')
-  }
-}
+// 已移除首页更新检查逻辑
 
 const selectSession = (s: Session) => {
   selected.value = s
@@ -220,15 +195,17 @@ const confirmAdd = (sessionData: PartialSession) => {
       // 保留用户在预览页修改后的所有字段
       ...sessionData,
     } as Session
-    console.log("新增会话：", newSession);
-    addSession(newSession).then((resp) => {
-      console.log(resp);
-      sessions.value.push(resp)
-      newSessionData.value = null
-      router.push({ name: 'SessionDetail', params: { id: resp.id } })
-    }).catch((error) => {
-      console.error('Error adding session:', error)
-    });
+    console.log('新增会话：', newSession)
+    addSession(newSession)
+      .then((resp) => {
+        console.log(resp)
+        sessions.value.push(resp)
+        newSessionData.value = null
+        router.push({ name: 'SessionDetail', params: { id: resp.id } })
+      })
+      .catch((error) => {
+        console.error('Error adding session:', error)
+      })
   }
 }
 
@@ -239,12 +216,21 @@ const loadSessions = () => {
         sessions.value.push(d)
       }
     }
+    // initialize auto sync watchers for sessions marked auto_sync
+    try {
+      const userId = Number(localStorage.getItem('user_id') || '0')
+      if (userId > 0) {
+        const baseUrl = endpoint() + '/api'
+        const t = getToken() || undefined
+        invoke('init_user_auto_sync', { userId, baseUrl, token: t }).catch(() => {})
+      }
+    } catch {}
   })
 }
 
 // 提供删除方法给子路由页面调用（如 SessionDetailPage）
 const removeSessionById = (id: number) => {
-  const idx = sessions.value.findIndex(s => s.id === id)
+  const idx = sessions.value.findIndex((s) => s.id === id)
   if (idx !== -1) sessions.value.splice(idx, 1)
   if (selected.value?.id === id) selected.value = null
 }
@@ -254,11 +240,7 @@ loadSessions()
 </script>
 
 <style scoped>
-.h-screen {
-  height: 100vh;
-  background: #f7f7f7;
-}
-
+.h-screen { height: 100vh; background: #f7f7f7; }
 .app-header {
   position: sticky;
   top: 0;
@@ -271,20 +253,45 @@ loadSessions()
   background: #fff;
   border-bottom: 1px solid #eee;
 }
-.app-header .left { display: flex; align-items: center; gap: 8px; }
+.app-header .left, .app-header .right { display: flex; align-items: center; }
+.app-header .left { gap: 8px; }
 .app-header .logo { width: 20px; height: 20px; }
 .app-header .title { font-size: 14px; font-weight: 600; color: #333; }
-
-/* 主体布局高度为视口高度减去头部，且不让容器滚动 */
-.body-layout {
-  height: calc(100vh - 50px);
-  overflow: hidden;
+.body-layout { height: calc(100vh - 50px); overflow: hidden; }
+.main-content { height: 100%; overflow: auto; background: #f7f7f7; }
+.update-toast {
+  position: absolute;
+  top: 8px;
+  right: 70px;
+  background: #fffbe6;
+  border: 1px solid #ffecb3;
+  padding: 6px 10px;
+  font-size: 12px;
+  border-radius: 4px;
+  box-shadow: 0 2px 6px rgba(0,0,0,0.12);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
 }
-
-/* 让右侧内容区域拥有独立滚动条 */
-.main-content {
-  height: 100%;
-  overflow: auto;
-  background: #f7f7f7;
+.update-toast .close {
+  background: transparent;
+  border: none;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  color: #999;
 }
+.update-toast .close:hover { color: #666; }
+.update-panel {
+  background: #fff;
+  border: 1px solid #e5e5e5;
+  padding: 12px 16px;
+  border-radius: 6px;
+  margin-bottom: 16px;
+  box-shadow: 0 2px 6px rgba(0,0,0,0.08);
+}
+.update-panel h3 { margin: 0 0 8px; font-size: 14px; }
+.update-panel .notes { background: #f8f8f8; padding: 8px; white-space: pre-wrap; font-size: 12px; border-radius: 4px; }
+.update-panel .actions { display: flex; gap: 8px; margin-top: 8px; }
 </style>

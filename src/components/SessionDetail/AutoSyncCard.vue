@@ -9,7 +9,7 @@
         </n-icon>
         <div class="auto-sync-texts">
           <div class="title">自动同步</div>
-          <div class="desc">开启后应用将在空闲时自动执行增量同步。</div>
+          <div class="desc">开启后应用将监控文件变化并自动执行同步。</div>
         </div>
       </div>
       <n-switch :value="value" @update:value="onToggle" size="small">

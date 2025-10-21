@@ -68,7 +68,8 @@ import { ref, reactive, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import type { FormInst, FormRules } from 'naive-ui'
 import { NCard, NForm, NFormItem, NInput, NButton, NAlert } from 'naive-ui'
-import { login as userLogin } from '@/api/auth'
+import { login as userLogin, me as fetchMe } from '@/api/auth'
+import { invoke } from '@tauri-apps/api/core'
 import { saveToken } from '@/common/login'
 
 const router = useRouter()
@@ -151,9 +152,22 @@ const login = async () => {
         resp.json().then(d => {
           let token = d.token_type + " " + d.access_token;
           saveToken(token);
-          // Persist the server endpoint for next visits
           localStorage.setItem('endpoint', payload.endpoint);
-          router.push('/');
+          // fetch current user info
+          fetchMe(payload.endpoint, token).then(r => {
+            if (r.status === 200) {
+              r.json().then(info => {
+                if (info && (info.id !== undefined)) {
+                  localStorage.setItem('user_id', String(info.id));
+                  // push auth context to backend (base_url use endpoint + '/api')
+                  try { invoke('set_auth_context', { userId: Number(info.id), token, baseUrl: payload.endpoint + '/api' }) } catch {}
+                }
+                router.push('/');
+              });
+            } else {
+              router.push('/');
+            }
+          }).catch(() => router.push('/'));
         });
       } else {
         resp.json().then(d => {

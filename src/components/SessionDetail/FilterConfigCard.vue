@@ -63,9 +63,11 @@ const handleFiltersChange = (value: string) => {
   emit('update:syncFilters', value)
 }
 
+const userId = Number(localStorage.getItem('user_id') || '0')
+
 const saveFilters = async () => {
   try {
-    await invoke('save_session_filters', { sessionId: props.sessionId, syncFilters: props.syncFilters || '' })
+    await invoke('save_session_filters', { sessionId: props.sessionId, userId, syncFilters: props.syncFilters || '' })
     message.success('已保存过滤配置')
   } catch (e) {
     console.warn('save_session_filters failed', e)

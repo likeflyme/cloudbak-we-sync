@@ -26,7 +26,7 @@
 </template>
 
 <script setup lang="ts">
-import { NLayoutSider, NIcon } from 'naive-ui';
+import { NLayoutSider } from 'naive-ui';
 import { ref, onMounted, watch } from 'vue';
 import { endpoint } from '@/common/login';
 import type { Session } from '@/models/session';

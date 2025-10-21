@@ -12,27 +12,37 @@ pub async fn open_in_os(path: String, reveal: Option<bool>) -> Result<(), String
         let mut cmd = Command::new("explorer.exe");
         if use_reveal {
             // reveal file or folder
-            cmd.arg("/select,").arg(p);
+            cmd.arg("/select,").arg(p.clone());
         } else {
-            cmd.arg(p);
+            cmd.arg(p.clone());
         }
-        cmd.spawn().map_err(|e| e.to_string())?;
+        tracing::debug!(%p, reveal = use_reveal, "open_in_os windows");
+        cmd.spawn().map_err(|e| {
+            tracing::warn!(%p, error = %e, "explorer spawn failed");
+            e.to_string()
+        })?;
         return Ok(());
     }
 
     #[cfg(target_os = "macos")]
     {
         use std::process::Command;
-        // reveal is not used on mac here; 'open' will open Finder
-        Command::new("open").arg(&path).spawn().map_err(|e| e.to_string())?;
+        tracing::debug!(%path, "open_in_os mac" );
+        Command::new("open").arg(&path).spawn().map_err(|e| {
+            tracing::warn!(%path, error = %e, "open spawn failed");
+            e.to_string()
+        })?;
         return Ok(());
     }
 
     #[cfg(target_os = "linux")]
     {
         use std::process::Command;
-        // use xdg-open where available
-        Command::new("xdg-open").arg(&path).spawn().map_err(|e| e.to_string())?;
+        tracing::debug!(%path, "open_in_os linux");
+        Command::new("xdg-open").arg(&path).spawn().map_err(|e| {
+            tracing::warn!(%path, error = %e, "xdg-open spawn failed");
+            e.to_string()
+        })?;
         return Ok(());
     }
 

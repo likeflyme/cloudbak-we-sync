@@ -32,6 +32,12 @@ const routes: Array<RouteRecordRaw> = [
         name: 'Settings',
         component: () => import('@/views/Settings.vue'),
         meta: { loginRequire: true }
+      },
+      {
+        path: 'update',
+        name: 'UpdateDetail',
+        component: () => import('@/views/UpdateDetail.vue'),
+        meta: { loginRequire: true }
       }
     ]
   },

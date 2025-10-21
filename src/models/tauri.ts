@@ -1,9 +1,5 @@
 import { invoke, convertFileSrc } from '@tauri-apps/api/core';
 
-interface ExtractSession {
-    
-}
-
 // 获取
 export const load_avatar = async (path: string): Promise<string> => {
     const stripLongPathPrefix = path.replace(/^\\\\\?\\/, '');

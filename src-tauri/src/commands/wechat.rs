@@ -4,9 +4,11 @@
 pub async fn extract_wechat_keys(data_dir: Option<String>) -> Result<serde_json::Value, String> {
     use crate::internal::windows::{winproc, memory, dat2img};
     use anyhow::Result;
+    tracing::info!(?data_dir, "extract_wechat_keys invoked");
 
     fn inner(mut data_dir: Option<String>) -> Result<serde_json::Value> {
         let mut procs = winproc::find_wechat_v4_processes()?;
+        tracing::debug!(count = procs.len(), "found wechat processes");
         if procs.is_empty() {
             return Ok(serde_json::json!({
                 "ok": false,
@@ -26,8 +28,10 @@ pub async fn extract_wechat_keys(data_dir: Option<String>) -> Result<serde_json:
                 Some(p)
             })
             .unwrap();
+        tracing::info!(pid = selected.pid, status = %selected.status, data_dir = ?selected.data_dir, acct = ?selected.account_name, "wechat process selected");
 
         let (data_key_hex, img_key_hex) = memory::extract_keys_windows(&selected)?;
+        tracing::debug!(has_data_key = data_key_hex.is_some(), has_img_key = img_key_hex.is_some(), "keys extracted");
         let mut xor_key: Option<u8> = None;
         if let Some(dir) = selected.data_dir.as_deref() {
             xor_key = dat2img::scan_and_set_xor_key(dir)?;
@@ -39,6 +43,7 @@ pub async fn extract_wechat_keys(data_dir: Option<String>) -> Result<serde_json:
             use crate::internal::windows::avatar;
             head_img = avatar::extract_avatar_to_appdata(&data_dir, &data_key_hex, &wx_id);
         }
+        tracing::debug!(has_head_img = head_img.is_some(), "avatar extraction done");
         // client type/version
         let client_type = "win"; // current project only supports Windows extraction
         let client_version = selected
@@ -80,6 +85,7 @@ pub async fn extract_wechat_keys(_data_dir: Option<String>) -> Result<serde_json
 #[tauri::command]
 pub fn load_avatar(path: String) -> Result<String, String> {
     use base64::Engine; // bring trait into scope for encode()
+    tracing::debug!(%path, "load_avatar invoked");
     fn detect_mime(bytes: &[u8], path: &str) -> &'static str {
         let lower = path.to_lowercase();
         if lower.ends_with(".png") {
@@ -103,8 +109,12 @@ pub fn load_avatar(path: String) -> Result<String, String> {
         }
     }
 
-    let data = std::fs::read(&path).map_err(|e| e.to_string())?;
+    let data = std::fs::read(&path).map_err(|e| {
+        tracing::warn!(%path, error = %e, "avatar read failed");
+        e.to_string()
+    })?;
     let mime = detect_mime(&data, &path);
     let b64 = base64::engine::general_purpose::STANDARD.encode(&data);
+    tracing::debug!(%path, mime, size = data.len(), "avatar encoded");
     Ok(format!("data:{};base64,{}", mime, b64))
 }

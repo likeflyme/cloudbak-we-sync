@@ -32,6 +32,7 @@
       </n-collapse-item>
     </n-collapse>
 
+    <br/>
     <!-- 操作按钮区域 -->
     <ActionButtons 
       @sync="(key: string) => $emit('sync', key)"
