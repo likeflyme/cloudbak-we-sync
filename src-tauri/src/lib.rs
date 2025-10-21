@@ -94,6 +94,17 @@ pub fn run() {
                     }
                 }
             }
+            // 尝试加载持久化的认证信息 (store 优先)
+            if let Ok(Some(info)) = tauri::async_runtime::block_on(commands::auth::load_persisted_auth(app.state::<commands::auth::AuthState>(), app.handle().clone())) {
+                let uid = info.user_id;
+                let base_url = info.base_url.clone();
+                let token = None; // token 在状态中
+                if !base_url.is_empty() {
+                    tauri::async_runtime::spawn(async move {
+                        let _ = crate::commands::sync::init_user_auto_sync(uid, base_url, token).await;
+                    });
+                }
+            }
             Ok(())
         })
         .manage(AuthState(parking_lot::Mutex::new(None)))
@@ -103,6 +114,7 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         // 新增自启插件，传递自启标记参数
         .plugin(tauri_plugin_autostart::Builder::new().arg("--auto-launched").app_name("We Sync").build())
+        .plugin(tauri_plugin_store::Builder::default().build())
         .invoke_handler(commands::all_handlers())
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

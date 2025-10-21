@@ -1,4 +1,4 @@
-use std::{collections::HashMap, path::{Path, PathBuf}, sync::{Arc, atomic::{AtomicBool, Ordering}}};
+use std::{collections::{HashMap, HashSet}, path::{Path, PathBuf}, sync::{Arc, atomic::{AtomicBool, Ordering}}};
 use crate::commands::auth::AuthState;
 use anyhow::Result;
 use once_cell::sync::Lazy;
@@ -45,6 +45,8 @@ struct WatchHandle {
 }
 
 static WATCHERS: Lazy<Mutex<HashMap<String, WatchHandle>>> = Lazy::new(|| Mutex::new(HashMap::new()));
+// 新增：跟踪已经启动的 session watcher，防止重复
+static ACTIVE_AUTO_SESSIONS: Lazy<Mutex<HashSet<i32>>> = Lazy::new(|| Mutex::new(HashSet::new()));
 
 #[derive(Debug, Deserialize)]
 struct RemoteEntry {
@@ -247,6 +249,7 @@ fn spawn_watcher(session_id: i32, user_id: i32, root: PathBuf, base_url: String,
         watcher.watch(&root, RecursiveMode::Recursive).expect("watch start");
         tracing::info!(session_id, "watcher active");
 
+        // watcher loop
         while !cancel.load(Ordering::Relaxed) {
             let Ok(res) = rx.recv_timeout(Duration::from_millis(500)) else { continue; };
             let evt = match res { Ok(e) => e, Err(err) => { tracing::warn!(session_id, error = %err, "watch event error"); continue } };
@@ -268,6 +271,10 @@ fn spawn_watcher(session_id: i32, user_id: i32, root: PathBuf, base_url: String,
             }
         }
         tracing::info!(session_id, "watcher thread exiting");
+        // 线程退出时清理活跃集合（如果未显式 stop 也能被重启）
+        let mut active = ACTIVE_AUTO_SESSIONS.lock();
+        active.remove(&session_id);
+        // 不移除 WATCHERS：stop_auto_sync 已负责；若线程自然退出，可在下一次启动前覆盖
     });
 
     Ok(())
@@ -488,12 +495,23 @@ pub async fn save_session_info(session_id: i32, user_id: i32, info: serde_json::
 pub async fn start_auto_sync(sys_session_id: i32, user_id: i32, wx_dir: String, base_url: String, token: Option<String>) -> Result<(), String> {
      let root = PathBuf::from(&wx_dir);
      if !root.exists() { return Err("本机未找到会话目录，无法开启自动同步".into()); }
-     let _ = stop_auto_sync(sys_session_id, user_id).await;
+     {
+         let active = ACTIVE_AUTO_SESSIONS.lock();
+         if active.contains(&sys_session_id) {
+             tracing::info!(session_id = sys_session_id, user_id, "auto sync watcher already active, skip");
+             return Ok(());
+         }
+     }
+     let _ = stop_auto_sync(sys_session_id, user_id).await; // 保留原逻辑以防残留
     tracing::info!(session_id = sys_session_id, user_id, %wx_dir, "start_auto_sync");
      let cancel = Arc::new(AtomicBool::new(false));
      let handle = WatchHandle { cancel: cancel.clone() };
      WATCHERS.lock().insert(sys_session_id.to_string(), handle);
      spawn_watcher(sys_session_id, user_id, root, base_url, token, cancel).map_err(|e| e.to_string())?;
+     {
+         let mut active = ACTIVE_AUTO_SESSIONS.lock();
+         active.insert(sys_session_id);
+     }
      let mut cfg = load_session_config(sys_session_id, user_id).unwrap_or_default();
      cfg.auto_sync = Some(true);
      save_session_config_inner(sys_session_id, user_id, &cfg).map_err(|e| e.to_string())?;
@@ -503,6 +521,10 @@ pub async fn start_auto_sync(sys_session_id: i32, user_id: i32, wx_dir: String, 
 #[tauri::command]
 pub async fn stop_auto_sync(sys_session_id: i32, user_id: i32) -> Result<(), String> {
      if let Some(w) = WATCHERS.lock().remove(&sys_session_id.to_string()) { w.cancel.store(true, Ordering::Relaxed); }
+     {
+         let mut active = ACTIVE_AUTO_SESSIONS.lock();
+         active.remove(&sys_session_id);
+     }
     tracing::info!(session_id = sys_session_id, user_id, "stop_auto_sync");
      let mut cfg = load_session_config(sys_session_id, user_id).unwrap_or_default();
      cfg.auto_sync = Some(false);
@@ -532,24 +554,28 @@ pub async fn init_user_auto_sync(user_id: i32, base_url: String, token: Option<S
          let file_stem = match path.file_stem().and_then(|s| s.to_str()) { Some(s) => s, None => continue };
          let session_id: i32 = match file_stem.parse() { Ok(v) => v, Err(_) => continue };
          let cfg = match load_session_config(session_id, user_id) { Some(c) => c, None => continue };
-         if cfg.auto_sync.unwrap_or(false) {
-             // need wx_dir from session_info
-             if let Some(info) = cfg.session_info.as_ref() {
-                 if let Some(wx_dir_val) = info.get("wx_dir") {
-                     if let Some(wx_dir) = wx_dir_val.as_str() {
-                         if !wx_dir.is_empty() && std::path::Path::new(wx_dir).exists() {
-                             if let Some(old) = WATCHERS.lock().remove(&session_id.to_string()) { old.cancel.store(true, Ordering::Relaxed); }
-                             let cancel = Arc::new(AtomicBool::new(false));
-                             let handle = WatchHandle { cancel: cancel.clone() };
-                             WATCHERS.lock().insert(session_id.to_string(), handle);
-                             if let Err(e) = spawn_watcher(session_id, user_id, std::path::PathBuf::from(wx_dir), base_url.clone(), token.clone(), cancel) {
-                                 eprintln!("init_user_auto_sync watcher start failed for session {}: {}", session_id, e);
-                                tracing::error!(session_id, error = %e, "auto sync watcher start failed");
-                             } else {
-                                tracing::info!(session_id, "auto sync watcher started");
-                                 started += 1;
-                             }
-                         }
+         if !cfg.auto_sync.unwrap_or(false) { continue; }
+         // 已有 watcher 则跳过
+         {
+             let active = ACTIVE_AUTO_SESSIONS.lock();
+             if active.contains(&session_id) {
+                 tracing::info!(session_id, user_id, "watcher already active, skip in init");
+                 continue;
+             }
+         }
+         if let Some(info) = cfg.session_info.as_ref() {
+             if let Some(wx_dir_val) = info.get("wx_dir").and_then(|v| v.as_str()) {
+                 if !wx_dir_val.is_empty() && Path::new(wx_dir_val).exists() {
+                     let cancel = Arc::new(AtomicBool::new(false));
+                     let handle = WatchHandle { cancel: cancel.clone() };
+                     WATCHERS.lock().insert(session_id.to_string(), handle);
+                     if let Err(e) = spawn_watcher(session_id, user_id, PathBuf::from(wx_dir_val), base_url.clone(), token.clone(), cancel) {
+                        tracing::error!(session_id, error = %e, "auto sync watcher start failed");
+                     } else {
+                        let mut active = ACTIVE_AUTO_SESSIONS.lock();
+                        active.insert(session_id);
+                        tracing::info!(session_id, "auto sync watcher started");
+                        started += 1;
                      }
                  }
              }

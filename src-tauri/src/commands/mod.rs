@@ -27,5 +27,8 @@ pub fn all_handlers() -> impl Fn(tauri::ipc::Invoke) -> bool {
         auth::clear_auth_context,
         auth::get_current_user_id,
         auth::get_auth_context,
+        auth::persist_auth,
+        auth::load_persisted_auth,
+        auth::clear_persisted_auth,
     ]
 }

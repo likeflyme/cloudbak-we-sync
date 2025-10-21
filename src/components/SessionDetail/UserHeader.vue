@@ -9,6 +9,11 @@
       <div class="user-basic-info">
         <h2 class="user-title">{{ session.name }}</h2>
         <p class="user-subtitle">{{ session.desc }}</p>
+        <!-- 客户端信息标签：使用会话自身的版本号 -->
+        <div class="user-badges" v-if="session.client_type || session.client_version">
+          <n-tag type="success" size="small" v-if="session.client_type">{{ session.client_type }}</n-tag>
+          <n-tag type="info" size="small" v-if="session.client_version">{{ session.client_version }}</n-tag>
+        </div>
       </div>
     </div>
   </div>
@@ -18,39 +23,28 @@
 import { ref, watch } from 'vue';
 import { endpoint } from '@/common/login';
 import type { Session } from '@/models/session';
+import { NTag } from 'naive-ui';
 
-const props = defineProps<{
-  session: Session;
-}>();
+const props = defineProps<{ session: Session }>();
 
 const host = endpoint();
+const avatarSrc = ref<string>('');
 
-// Build avatar url from session
 const buildAvatarUrl = () => `${host}/api/resources/relative-resource?relative_path=${props.session.wx_id}/head_image/${props.session.wx_id}.jpg&session_id=${props.session.id}`
 
-// Mutable src so we can switch to fallback on error
-const avatarSrc = ref<string>(buildAvatarUrl());
-
-// Update avatar when session changes
 watch(
   () => [props.session.wx_id, props.session.id],
-  () => {
-    avatarSrc.value = buildAvatarUrl();
-  },
+  () => { avatarSrc.value = buildAvatarUrl(); },
   { immediate: true }
 );
 
 const session = props.session;
 
-const getDefaultAvatar = (name?: string) => {
-  return `https://ui-avatars.com/api/?name=${encodeURIComponent(name || 'U')}&background=random&size=128`
-}
+const getDefaultAvatar = (name?: string) => `https://ui-avatars.com/api/?name=${encodeURIComponent(name || 'U')}&background=random&size=128`
 
 const onAvatarError = () => {
   const fallback = getDefaultAvatar(props.session.name);
-  if (avatarSrc.value !== fallback) {
-    avatarSrc.value = fallback;
-  }
+  if (avatarSrc.value !== fallback) avatarSrc.value = fallback;
 }
 </script>
 

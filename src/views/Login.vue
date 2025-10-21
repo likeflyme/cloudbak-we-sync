@@ -152,15 +152,13 @@ const login = async () => {
         resp.json().then(d => {
           let token = d.token_type + " " + d.access_token;
           saveToken(token);
-          localStorage.setItem('endpoint', payload.endpoint);
+          localStorage.setItem('endpoint', payload.endpoint); // 保留 endpoint 也可改 store
           // fetch current user info
           fetchMe(payload.endpoint, token).then(r => {
             if (r.status === 200) {
               r.json().then(info => {
                 if (info && (info.id !== undefined)) {
-                  localStorage.setItem('user_id', String(info.id));
-                  // push auth context to backend (base_url use endpoint + '/api')
-                  try { invoke('set_auth_context', { userId: Number(info.id), token, baseUrl: payload.endpoint + '/api' }) } catch {}
+                  try { invoke('persist_auth', { userId: Number(info.id), token, baseUrl: payload.endpoint + '/api' }) } catch {}
                 }
                 router.push('/');
               });

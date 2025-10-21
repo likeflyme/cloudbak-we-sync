@@ -32,6 +32,12 @@
       </div>
     </n-layout-header>
 
+    <!-- 更新提示气泡 -->
+    <div v-if="showUpdateToast" class="update-toast" @click="goUpdate" title="点击查看更新详情">
+      <span>发现新版本 v{{ updateVersion }}</span>
+      <button class="close" @click.stop="dismissUpdateToast">×</button>
+    </div>
+
     <!-- 下方主体：左侧侧边栏 + 右侧内容区域 -->
     <n-layout has-sider class="body-layout">
       <!-- 左侧会话列表（侧边栏） -->
@@ -54,17 +60,27 @@
         <router-view v-else />
       </n-layout-content>
     </n-layout>
+
+    <!-- 关于我们弹窗 -->
+    <n-modal v-model:show="showAboutDialog" preset="card" title="关于我们" style="max-width:420px;">
+      <div style="font-size:14px; line-height:1.6;">
+        <p><strong>客户端版本号：</strong>{{ clientVersion }}</p>
+        <p><strong>官方网站：</strong><a href="https://www.cloudbak.org" target="_blank">https://www.cloudbak.org</a></p>
+        <p><strong>社区论坛：</strong><a href="https://forum.cloudbak.org.cn" target="_blank">https://forum.cloudbak.org.cn</a></p>
+      </div>
+    </n-modal>
   </n-layout>
 </template>
 
 <script setup lang="ts">
-import { ref, provide } from 'vue'
-import { NLayout, NLayoutContent, NLayoutHeader, NButton, NIcon, NDropdown } from 'naive-ui'
+import { ref, provide, computed, onMounted } from 'vue'
+import { NLayout, NLayoutContent, NLayoutHeader, NButton, NIcon, NDropdown, NModal } from 'naive-ui'
 import { invoke } from '@tauri-apps/api/core'
 import { removeToken } from '@/common/login'
 import { useRouter } from 'vue-router'
 import { getSessions, addSession } from '@/api/user'
 import { token as getToken, endpoint } from '@/common/login'
+import { getVersion } from '@tauri-apps/api/app'
 // 临时类型声明避免 TS 报错（若 @tauri-apps/plugin-updater 未提供类型）
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-ignore
@@ -84,18 +100,34 @@ const sessions = ref<Session[]>([])
 const selected = ref<Session | null>(null)
 const isAddingSession = ref(false)
 const newSessionData = ref<PartialSession | null>(null)
+const showAboutDialog = ref(false)
+const appVersion = ref<string>('未知')
 
 const menuOptions = [
   { label: '系统设置', key: 'settings' },
   { label: '检查更新', key: 'update' },
+  { label: '关于我们', key: 'about' },
   { label: '退出登录', key: 'logout' }
 ]
+
+onMounted(async () => {
+  try { 
+    appVersion.value = await getVersion() 
+  } catch(e) {
+    console.error('获取应用版本失败:', e)
+  }
+})
+
+// 计算客户端版本号（关于我们用软件版本号）
+const clientVersion = computed(() => appVersion.value)
 
 const onMenuSelect = (key: string) => {
   if (key === 'settings') {
     router.push({ name: 'Settings' })
   } else if (key === 'update') {
     router.push({ name: 'UpdateDetail' })
+  } else if (key === 'about') {
+    showAboutDialog.value = true
   } else if (key === 'logout') {
     const ok = window.confirm('确定要退出登录吗？')
     if (!ok) return
@@ -228,6 +260,40 @@ const loadSessions = () => {
   })
 }
 
+// 更新提示相关状态
+const showUpdateToast = ref(false)
+const updateVersion = ref('')
+
+const goUpdate = () => {
+  showUpdateToast.value = false
+  router.push({ name: 'UpdateDetail' })
+}
+const dismissUpdateToast = () => {
+  showUpdateToast.value = false
+}
+
+onMounted(async () => {
+  try {
+    const result = await check()
+    console.log('更新检查结果:', result)
+    // 兼容不同返回结构：有些版本返回 { available: boolean, version: string }
+    if (result) {
+      const available = (result as any).available ?? true // 旧版若有返回对象即表示可用
+      console.log('更新可用:', available)
+      const ver = (result as any).version || (result as any).manifestVersion || ''
+      console.log('更新版本:', ver)
+      if (available) {
+        updateVersion.value = ver || '未知'
+        showUpdateToast.value = true
+        console.log('显示更新提示:', showUpdateToast.value)
+      }
+    }
+  } catch (e) {
+    // 静默失败，不影响使用
+    console.warn('更新检查失败:', e)
+  }
+})
+
 // 提供删除方法给子路由页面调用（如 SessionDetailPage）
 const removeSessionById = (id: number) => {
   const idx = sessions.value.findIndex((s) => s.id === id)
@@ -260,7 +326,7 @@ loadSessions()
 .body-layout { height: calc(100vh - 50px); overflow: hidden; }
 .main-content { height: 100%; overflow: auto; background: #f7f7f7; }
 .update-toast {
-  position: absolute;
+  position: fixed; /* 使用 fixed 保证相对窗口定位 */
   top: 8px;
   right: 70px;
   background: #fffbe6;
@@ -273,6 +339,7 @@ loadSessions()
   align-items: center;
   gap: 8px;
   cursor: pointer;
+  z-index: 1000; /* 比 header (z-index:10) 更高 */
 }
 .update-toast .close {
   background: transparent;
@@ -294,4 +361,30 @@ loadSessions()
 .update-panel h3 { margin: 0 0 8px; font-size: 14px; }
 .update-panel .notes { background: #f8f8f8; padding: 8px; white-space: pre-wrap; font-size: 12px; border-radius: 4px; }
 .update-panel .actions { display: flex; gap: 8px; margin-top: 8px; }
+
+.update-toast {
+  position: fixed; /* 使用 fixed 保证相对窗口定位 */
+  top: 8px;
+  right: 70px;
+  background: #fffbe6;
+  border: 1px solid #ffecb3;
+  padding: 6px 10px;
+  font-size: 12px;
+  border-radius: 4px;
+  box-shadow: 0 2px 6px rgba(0,0,0,0.12);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  z-index: 1000; /* 比 header (z-index:10) 更高 */
+}
+.update-toast .close {
+  background: transparent;
+  border: none;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  color: #999;
+}
+.update-toast .close:hover { color: #666; }
 </style>

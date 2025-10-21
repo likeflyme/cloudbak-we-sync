@@ -46,7 +46,8 @@
         </div>
       </div>
       
-      <div class="key-item">
+      <!-- 图片AES密钥 (隐藏于 v3) -->
+      <div class="key-item" v-if="showImageKeys">
         <div class="key-header">
           <span class="key-label">图片AES密钥</span>
           <div class="key-actions">
@@ -90,7 +91,8 @@
         </div>
       </div>
       
-      <div class="key-item">
+      <!-- 图片XOR密钥 (隐藏于 v3) -->
+      <div class="key-item" v-if="showImageKeys">
         <div class="key-header">
           <span class="key-label">图片XOR密钥</span>
           <div class="key-actions">
@@ -122,8 +124,10 @@
 <script setup lang="ts">
 import { NCard, NIcon, NButton } from 'naive-ui';
 import type { Session } from '@/models/session';
+import { computed } from 'vue';
 
-defineProps<{
+// 单次定义 props，避免重复调用 defineProps
+const props = defineProps<{
   session: Session;
   keyVisibility: {
     data_key: boolean;
@@ -131,6 +135,15 @@ defineProps<{
     xor_key: boolean;
   };
 }>();
+
+// 根据客户端版本决定是否显示图片相关密钥 (v3 不显示)
+// 兼容 "v3", "3", "3.0.0", "v3.1" 等格式
+const showImageKeys = computed(() => {
+  const raw = props.session.client_version || ''
+  const cleaned = raw.trim().toLowerCase().replace(/^v/, '')
+  const major = cleaned.split(/[._-]/)[0]
+  return major !== '3'
+});
 
 // 脱敏显示密钥
 const maskKey = (key: string) => {

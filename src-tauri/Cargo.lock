@@ -4701,6 +4701,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "tauri-plugin-store"
+version = "2.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d85dd80d60a76ee2c2fdce09e9ef30877b239c2a6bb76e6d7d03708aa5f13a19"
+dependencies = [
+ "dunce",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-plugin",
+ "thiserror 2.0.16",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "tauri-plugin-updater"
 version = "2.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5585,7 +5601,7 @@ dependencies = [
 
 [[package]]
 name = "we-sync"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "aes",
  "anyhow",
@@ -5613,6 +5629,7 @@ dependencies = [
  "tauri-plugin-autostart",
  "tauri-plugin-http",
  "tauri-plugin-opener",
+ "tauri-plugin-store",
  "tauri-plugin-updater",
  "thiserror 1.0.69",
  "tracing",

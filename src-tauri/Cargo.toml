@@ -1,6 +1,6 @@
 [package]
 name = "we-sync"
-version = "1.0.1"
+version = "1.0.2"
 description = "A Tauri App"
 authors = ["you"]
 edition = "2021"
@@ -48,6 +48,7 @@ notify = "6"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "time", "env-filter"] }
 tracing-appender = "0.2"
+tauri-plugin-store = "2"
 
 # windows api (CNG + Registry + FileSystem + SystemInformation)
 windows = { version = "0.58", features = [
