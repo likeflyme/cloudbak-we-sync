@@ -35,6 +35,7 @@
     <br/>
     <!-- 操作按钮区域 -->
     <ActionButtons 
+      :syncing="syncing"
       @sync="(key: string) => $emit('sync', key)"
       @delete="$emit('delete')"
     />
@@ -62,6 +63,7 @@ interface KeyVisibility {
 defineProps<{
   session: Session
   keyVisibility: KeyVisibility
+  syncing: boolean
 }>()
 
 const emit = defineEmits<{

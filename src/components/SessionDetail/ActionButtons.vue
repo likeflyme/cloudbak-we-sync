@@ -1,23 +1,30 @@
 <template>
   <div class="action-section">
     <n-space size="large">
-      <!-- 同步按钮组 -->
-      <n-dropdown
-        trigger="click"
-        :options="syncOptions"
-        @select="handleSync"
+      <!-- 同步按钮 -->
+      <n-button
+        :loading="syncing"
+        :disabled="syncing"
+        type="primary"
+        size="large"
+        class="action-btn wechat-btn"
+        @click="startSync"
       >
-        <n-button type="primary" size="large" class="action-btn wechat-btn">
-          <template #icon>
-            <n-icon>
-              <svg viewBox="0 0 24 24" fill="currentColor">
-                <path d="M12,18A6,6 0 0,1 6,12C6,11 6.25,10.03 6.7,9.2L5.24,7.74C4.46,8.97 4,10.43 4,12A8,8 0 0,0 12,20V23L16,19L12,15M12,4V1L8,5L12,9V6A6,6 0 0,1 18,12C18,13 17.75,13.97 17.3,14.8L18.76,16.26C19.54,15.03 20,13.57 20,12A8,8 0 0,0 12,4Z"/>
-              </svg>
-            </n-icon>
-          </template>
-          开始同步
-        </n-button>
-      </n-dropdown>
+        <template #icon>
+          <n-icon v-if="!syncing">
+            <svg viewBox="0 0 24 24" fill="currentColor">
+              <path d="M12,18A6,6 0 0,1 6,12C6,11 6.25,10.03 6.7,9.2L5.24,7.74C4.46,8.97 4,10.43 4,12A8,8 0 0,0 12,20V23L16,19L12,15M12,4V1L8,5L12,9V6A6,6 0 0,1 18,12C18,13 17.75,13.97 17.3,14.8L18.76,16.26C19.54,15.03 20,13.57 20,12A8,8 0 0,0 12,4Z" />
+            </svg>
+          </n-icon>
+          <n-icon v-else class="spin">
+            <svg viewBox="0 0 24 24" fill="currentColor">
+              <path d="M12 4a8 8 0 0 1 8 8h2A10 10 0 0 0 12 2v2Zm0 16a8 8 0 0 1-8-8H2a10 10 0 0 0 10 10v-2Z" />
+            </svg>
+          </n-icon>
+        </template>
+        <span v-if="!syncing">开始同步</span>
+        <span v-else>正在同步...</span>
+      </n-button>
 
       <!-- 删除按钮 -->
       <n-popconfirm
@@ -27,11 +34,17 @@
         placement="top"
       >
         <template #trigger>
-          <n-button type="error" size="large" class="action-btn" secondary>
+          <n-button
+            type="error"
+            size="large"
+            class="action-btn"
+            secondary
+            :disabled="syncing"
+          >
             <template #icon>
               <n-icon>
                 <svg viewBox="0 0 24 24" fill="currentColor">
-                  <path d="M19,4H15.5L14.5,3H9.5L8.5,4H5V6H19M6,19A2,2 0 0,0 8,21H16A2,2 0 0,0 18,19V7H6V19Z"/>
+                  <path d="M19,4H15.5L14.5,3H9.5L8.5,4H5V6H19M6,19A2,2 0 0,0 8,21H16A2,2 0 0,0 18,19V7H6V19Z" />
                 </svg>
               </n-icon>
             </template>
@@ -48,7 +61,7 @@
 </template>
 
 <script setup lang="ts">
-import { NButton, NDropdown, NIcon, NPopconfirm, NSpace } from 'naive-ui'
+import { NButton, NIcon, NPopconfirm, NSpace } from 'naive-ui'
 
 interface Emits {
   (e: 'sync', key: string): void
@@ -56,15 +69,10 @@ interface Emits {
 }
 
 const emit = defineEmits<Emits>()
+const props = defineProps<{ syncing: boolean }>()
 
-const syncOptions = [
-  { label: '同步', key: 'sync' },
-  { label: '全量同步', key: 'full' },
-  { label: '其他', key: 'other' }
-]
-
-const handleSync = (key: string) => {
-  emit('sync', key)
+const startSync = () => {
+  if (!props.syncing) emit('sync', 'sync')
 }
 
 const handleDelete = () => {
@@ -100,25 +108,31 @@ const handleDelete = () => {
 
 .wechat-btn:hover {
   background: #06ad56 !important;
-  transform: none;
   box-shadow: 0 2px 4px rgba(7, 193, 96, 0.3);
 }
 
-.action-btn:hover {
-  transform: none;
-  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+.spin {
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .delete-confirm p {
   margin: 0 0 8px 0;
-  color: #333333;
+  color: #333;
   font-size: 14px;
 }
 
 .delete-warning {
   font-size: 12px;
   color: #ff3b30;
-  font-style: normal;
 }
 
 /* 响应式设计 */
@@ -126,7 +140,7 @@ const handleDelete = () => {
   .action-section {
     padding: 16px;
   }
-  
+
   .action-btn {
     padding: 8px 20px;
     font-size: 13px;

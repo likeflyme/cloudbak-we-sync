@@ -8,6 +8,7 @@
         <SessionDetail
           :session="session"
           :key-visibility="keyVisibility"
+          :syncing="isRunning"
           @toggle-auto-sync="toggleAutoSync"
           @toggle-key-visibility="toggleKeyVisibility"
           @copy-key="copyKey"
@@ -18,23 +19,24 @@
 
         <!-- Sync status panel -->
         <div class="sync-status" v-if="syncStatus.state !== 'idle'">
-          <n-space align="center" justify="space-between">
+          <!-- changed: add vertical prop to n-space to enforce column layout -->
+          <n-space vertical class="sync-status-inner">
             <div class="status-text">
               <n-alert :type="statusType" :title="statusTitle" :show-icon="true" class="status-alert">
                 <div>
-                  <div v-if="syncStatus.message">{{ syncStatus.message }}</div>
+                  <div v-if="syncStatus.message" class="status-message">{{ syncStatus.message }}</div>
                   <div class="stats">
                     <span>扫描: {{ syncStatus.scanned }}</span>
                     <span>待传: {{ syncStatus.to_upload }}</span>
                     <span>已传: {{ syncStatus.uploaded }}</span>
                     <span>跳过: {{ syncStatus.skipped }}</span>
                     <span>失败: {{ syncStatus.failed }}</span>
-                    <span v-if="syncStatus.current">当前: {{ syncStatus.current }}</span>
+                    <span v-if="syncStatus.current" class="current" :title="syncStatus.current">当前: {{ syncStatus.current }}</span>
                   </div>
                 </div>
               </n-alert>
             </div>
-            <div>
+            <div class="status-actions">
               <n-button v-if="isRunning" type="warning" @click="stopSync">停止同步</n-button>
             </div>
           </n-space>
@@ -298,11 +300,18 @@ const deleteSession = () => {
 
 <style scoped>
 .main-content { background: #f7f7f7; }
-.sync-status {
-  margin: 16px 20px;
+.sync-status { margin: 16px 20px; }
+.sync-status-inner { display:block; width:100%; max-width:900px; }
+.status-text { width:100%; }
+.status-actions { width:100%; text-align:right; margin-top:4px; }
+.status-alert { width:100%; box-sizing:border-box; }
+.status-message { word-break:break-word; overflow-wrap:anywhere; }
+.stats { display:flex; gap:12px; flex-wrap:wrap; margin-top:6px; font-size:12px; color:#666; }
+.stats span { white-space:nowrap; }
+.stats .current { flex:1 1 100%; white-space:normal; word-break:break-all; overflow-wrap:anywhere; max-width:100%; line-height:1.4; }
+@media (max-width:760px){
+  .sync-status-inner { max-width:100%; width:100%; display:flex; }
+  .status-text, .status-alert { min-width:0; width:100%; }
+  .stats .current { flex:1 1 100%; }
 }
-.status-alert {
-  min-width: 520px;
-}
-.stats { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 6px; font-size: 12px; color: #666; }
 </style>
