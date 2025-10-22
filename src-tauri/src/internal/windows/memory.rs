@@ -2,6 +2,7 @@ use anyhow::{anyhow, Result};
 use crate::internal::windows::winproc::WeChatProcess;
 use crate::internal::windows::validator::{DBValidator, ImgKeyValidator};
 use rayon::prelude::*;
+use crate::commands::wechat::{is_extract_cancelled};
 
 #[cfg(target_os = "windows")]
 fn enable_debug_privilege() -> Result<()> {
@@ -41,11 +42,15 @@ pub fn extract_keys_windows(proc: &WeChatProcess) -> Result<(Option<String>, Opt
         let db_path = Path::new(dir).join("db_storage").join("message").join("message_0.db");
         println!("[dbg] DB path exists: {}", db_path.exists());
         let mut dat_count = 0usize;
-        for ent in walkdir::WalkDir::new(dir).into_iter().flatten() {
+        // Limit depth & early break if cancellation requested
+        for ent in walkdir::WalkDir::new(dir).max_depth(6).into_iter().flatten() {
+            if is_extract_cancelled() { println!("[dbg] cancelled during initial dat count"); return Ok((None, None)); }
             if ent.file_type().is_file() {
                 let n = ent.file_name().to_string_lossy();
                 if n.ends_with(".dat") { dat_count += 1; }
             }
+            if dat_count % 3000 == 0 && dat_count > 0 { println!("[dbg] .dat counting progress: {}", dat_count); }
+            if dat_count > 20000 { println!("[dbg] dat count cap reached: {}", dat_count); break; }
         }
         println!("[dbg] .dat files under data_dir: {}", dat_count);
     } else {
@@ -54,9 +59,11 @@ pub fn extract_keys_windows(proc: &WeChatProcess) -> Result<(Option<String>, Opt
 
     // Prepare validators
     let db_validator: Option<DBValidator> = if let Some(dir) = proc.data_dir.as_deref() {
+        if is_extract_cancelled() { return Ok((None, None)); }
         match DBValidator::new(dir) { Ok(v) => { println!("[dbg] DBValidator initialized"); Some(v) }, Err(e) => { println!("[dbg] DBValidator init failed: {}", e); None } }
     } else { None };
     let img_validator: Option<ImgKeyValidator> = if let Some(dir) = proc.data_dir.as_deref() {
+        if is_extract_cancelled() { return Ok((None, None)); }
         match ImgKeyValidator::new(dir) { Ok(v) => { println!("[dbg] ImgKeyValidator initialized"); Some(v) }, Err(e) => { println!("[dbg] ImgKeyValidator init failed: {}", e); None } }
     } else { None };
 
@@ -104,16 +111,17 @@ pub fn extract_keys_windows(proc: &WeChatProcess) -> Result<(Option<String>, Opt
         let mut seen_img: std::collections::HashSet<[u8; 16]> = HashSet::new();
 
         let mut regions_processed = 0usize;
-        const MAX_CHUNK: usize = 96 * 1024 * 1024; // increase chunk size
-        const MAX_REGION_CHUNKS: usize = 4; // process more per region
-        const MAX_REGIONS: usize = 1200; // scan more regions, include small heaps
-        const MAX_CAND_DB: usize = 6000; // collect more candidates
-        const MAX_CAND_IMG: usize = 60000;  // allow far more image candidates
+        const MAX_CHUNK: usize = 32 * 1024 * 1024; // reduce chunk size for speed
+        const MAX_REGION_CHUNKS: usize = 2; // fewer chunks per region first pass
+        const MAX_REGIONS: usize = 400; // cap regions for initial scan
+        const MAX_CAND_DB: usize = 2000; // lower candidate caps
+        const MAX_CAND_IMG: usize = 20000;  // allow far more image candidates
 
         // Immediate image key result (pointer-verified), like Python
         let mut img_hex_inline: Option<String> = None;
 
         while address < max_addr {
+            if is_extract_cancelled() { println!("[dbg] cancelled before region query"); return Ok((None, None)); }
             let mut mbi = MEMORY_BASIC_INFORMATION::default();
             let res = VirtualQueryEx(h, Some(address as _), &mut mbi, std::mem::size_of::<MEMORY_BASIC_INFORMATION>());
             if res == 0 { break; }
@@ -127,6 +135,7 @@ pub fn extract_keys_windows(proc: &WeChatProcess) -> Result<(Option<String>, Opt
                 println!("[dbg] region base=0x{:x} size={} prot=0x{:x} type=0x{:x} scanning={}", base, size, protect.0, memtype.0, total_to_scan);
                 let mut offset = 0usize;
                 while offset < total_to_scan {
+                    if is_extract_cancelled() { println!("[dbg] cancelled inside region scan"); return Ok((None, None)); }
                     let to_read = std::cmp::min(MAX_CHUNK, total_to_scan - offset);
                     let mut buf = vec![0u8; to_read];
                     let mut read = 0usize;
@@ -142,6 +151,7 @@ pub fn extract_keys_windows(proc: &WeChatProcess) -> Result<(Option<String>, Opt
                         let mut idx = buf.len();
                         let mut hits = 0usize;
                         while idx > 0 {
+                            if is_extract_cancelled() { println!("[dbg] cancelled during pattern search"); return Ok((None, None)); }
                             if let Some(pos) = memchr::memmem::rfind(&buf[..idx], &key_pattern) {
                                 hits += 1;
                                 if pos >= 8 {
@@ -199,6 +209,7 @@ pub fn extract_keys_windows(proc: &WeChatProcess) -> Result<(Option<String>, Opt
                         if cand_db.len() < MAX_CAND_DB {
                             let mut i = buf.len();
                             while i > 0 {
+                                if is_extract_cancelled() { println!("[dbg] cancelled during DATA_PAT fallback"); return Ok((None, None)); }
                                 if let Some(pos) = memchr::memmem::rfind(&buf[..i], DATA_PAT) {
                                     for off in DATA_OFFSETS {
                                         let key_off = pos as isize + off;
@@ -224,6 +235,7 @@ pub fn extract_keys_windows(proc: &WeChatProcess) -> Result<(Option<String>, Opt
                         if cand_img.len() < MAX_CAND_IMG {
                             let mut i = buf.len();
                             while i > 0 {
+                                if is_extract_cancelled() { println!("[dbg] cancelled during ZERO16 fallback"); return Ok((None, None)); }
                                 if let Some(pos) = memchr::memmem::rfind(&buf[..i], &ZERO16) {
                                     for off in IMG_FALLBACK_OFFSETS {
                                         if pos as isize + off >= 0 {
@@ -246,6 +258,7 @@ pub fn extract_keys_windows(proc: &WeChatProcess) -> Result<(Option<String>, Opt
                     offset += to_read;
                 }
                 regions_processed += 1;
+                if regions_processed % 50 == 0 { println!("[dbg] region progress: {} regions, db_cands={}, img_cands={}", regions_processed, cand_db.len(), cand_img.len()); }
                 if regions_processed > MAX_REGIONS { println!("[dbg] stop after {} regions", MAX_REGIONS); break; }
                 if cand_db.len() >= MAX_CAND_DB && cand_img.len() >= MAX_CAND_IMG { break; }
             }
@@ -256,26 +269,135 @@ pub fn extract_keys_windows(proc: &WeChatProcess) -> Result<(Option<String>, Opt
 
         println!("[dbg] candidates collected: db_keys={}, img_keys={}", cand_db.len(), cand_img.len());
 
-        // Phase 2: validate candidates (heavy PBKDF2) – in parallel like wechat-dump-rs
+        if is_extract_cancelled() { println!("[dbg] cancelled before validation phase"); return Ok((None, None)); }
+        // Phase 2: validate candidates
         let data_hex = if let Some(v) = &db_validator {
             cand_db
                 .par_iter()
-                .find_any(|k| v.validate_db_key(&k[..]))
+                .find_any(|k| {
+                    if is_extract_cancelled() { return false; }
+                    v.validate_db_key(&k[..])
+                })
                 .map(|k| hex::encode(k))
         } else { None };
-
-        let img_hex = if let Some(iv) = &img_validator {
+        if is_extract_cancelled() { println!("[dbg] cancelled mid validation"); return Ok((None, None)); }
+        let mut img_hex = if let Some(iv) = &img_validator {
             if img_hex_inline.is_some() {
                 img_hex_inline
             } else {
-                // try pointer-based candidates collected (first and last 16)
-                let found = cand_img.iter().find_map(|k16| if iv.validate_img_key(k16) { Some(hex::encode(k16)) } else { None });
-                if found.is_none() {
-                    println!("[dbg] ImgKey validation failed over {} candidates", cand_img.len());
-                }
+                let found = cand_img.iter().find_map(|k16| {
+                    if is_extract_cancelled() { return None; }
+                    if iv.validate_img_key(k16) { Some(hex::encode(k16)) } else { None }
+                });
+                if found.is_none() { println!("[dbg] ImgKey validation failed over {} candidates", cand_img.len()); }
                 found
             }
         } else { None };
+
+        // ---------------- Second-stage deep scan (B) if image key still missing ----------------
+        if img_hex.is_none() && img_validator.is_some() && !is_extract_cancelled() {
+            println!("[dbg] starting second-stage deep scan for image key (expanded limits)");
+            const DEEP_MAX_CHUNK: usize = 96 * 1024 * 1024;
+            const DEEP_MAX_REGION_CHUNKS: usize = 4;
+            const DEEP_MAX_REGIONS: usize = 1200;
+            const DEEP_MAX_CAND_IMG: usize = 60000;
+            let iv = img_validator.as_ref().unwrap();
+            let mut deep_address: usize = 0x10000;
+            let mut deep_regions = 0usize;
+            let mut deep_seen: std::collections::HashSet<[u8;16]> = std::collections::HashSet::new();
+            let mut deep_found_inline: Option<String> = None;
+            unsafe {
+                while deep_address < max_addr {
+                    if is_extract_cancelled() { println!("[dbg] cancelled during deep scan"); break; }
+                    let mut mbi = MEMORY_BASIC_INFORMATION::default();
+                    let res = VirtualQueryEx(h, Some(deep_address as _), &mut mbi, std::mem::size_of::<MEMORY_BASIC_INFORMATION>());
+                    if res == 0 { break; }
+                    let base = mbi.BaseAddress as usize;
+                    let size = mbi.RegionSize;
+                    let state = mbi.State;
+                    let protect = mbi.Protect;
+                    let memtype = mbi.Type;
+                    if size >= 64*1024 && size <= 512*1024*1024 && state == MEM_COMMIT && is_readable(protect.0) && is_acceptable_type(memtype.0) {
+                        let total_to_scan = std::cmp::min(size, DEEP_MAX_CHUNK * DEEP_MAX_REGION_CHUNKS);
+                        let mut offset = 0usize;
+                        while offset < total_to_scan {
+                            if is_extract_cancelled() { println!("[dbg] cancelled inside deep region"); break; }
+                            let to_read = std::cmp::min(DEEP_MAX_CHUNK, total_to_scan - offset);
+                            let mut buf = vec![0u8; to_read];
+                            let mut read = 0usize;
+                            let ok = ReadProcessMemory(h, (base + offset) as _, buf.as_mut_ptr() as _, to_read, Some(&mut read));
+                            if ok.is_ok() && read > 0 {
+                                buf.truncate(read);
+                                // pointer-based pattern reuse (image key extraction focus)
+                                let key_pattern: [u8; 24] = [
+                                    0,0,0,0,0,0,0,0,
+                                    0x20,0,0,0,0,0,0,0,
+                                    0x2F,0,0,0,0,0,0,0,
+                                ];
+                                let mut idx = buf.len();
+                                while idx > 0 {
+                                    if is_extract_cancelled() { println!("[dbg] cancelled during deep pattern search"); break; }
+                                    if let Some(pos) = memchr::memmem::rfind(&buf[..idx], &key_pattern) {
+                                        if pos >= 8 {
+                                            let mut ptr_bytes = [0u8; 8];
+                                            ptr_bytes.copy_from_slice(&buf[pos-8..pos]);
+                                            let ptr = usize::from_le_bytes(ptr_bytes);
+                                            if ptr > 0x10000 && ptr < 0x7FFF_FFFF_FFFF {
+                                                let mut keybuf = [0u8;32];
+                                                let mut got=0usize;
+                                                let ok2 = ReadProcessMemory(h, ptr as _, keybuf.as_mut_ptr() as _, 32, Some(&mut got));
+                                                if ok2.is_ok() && got >= 16 {
+                                                    if deep_found_inline.is_none() && iv.validate_img_key(&keybuf[..16]) { deep_found_inline = Some(hex::encode(&keybuf[..16])); }
+                                                    if deep_found_inline.is_none() && got >= 32 && iv.validate_img_key(&keybuf[16..32]) { deep_found_inline = Some(hex::encode(&keybuf[16..32])); }
+                                                    if deep_found_inline.is_some() { break; }
+                                                    // collect for fallback zero16 offsets expansion
+                                                    if deep_seen.len() < DEEP_MAX_CAND_IMG {
+                                                        let mut k16a = [0u8;16]; k16a.copy_from_slice(&keybuf[..16]); if deep_seen.insert(k16a) && iv.validate_img_key(&k16a) { deep_found_inline = Some(hex::encode(k16a)); break; }
+                                                        if got >= 32 { let mut k16b=[0u8;16]; k16b.copy_from_slice(&keybuf[16..32]); if deep_seen.insert(k16b) && iv.validate_img_key(&k16b) { deep_found_inline = Some(hex::encode(k16b)); break; } }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        idx = pos;
+                                    } else { break; }
+                                }
+                                if deep_found_inline.is_none() {
+                                    // broader ZERO16 fallback (extend offsets)
+                                    const EXTRA_OFFSETS: [isize; 6] = [-200,-160,-144,-136,-128,-112];
+                                    let mut i = buf.len();
+                                    while i > 0 && deep_found_inline.is_none() {
+                                        if let Some(pos) = memchr::memmem::rfind(&buf[..i], &ZERO16) {
+                                            for off in IMG_FALLBACK_OFFSETS.iter().chain(EXTRA_OFFSETS.iter()) {
+                                                if pos as isize + off >= 0 {
+                                                    let ko = (pos as isize + off) as usize;
+                                                    if ko + 16 <= buf.len() {
+                                                        let mut k16=[0u8;16]; k16.copy_from_slice(&buf[ko..ko+16]);
+                                                        if deep_seen.insert(k16) && iv.validate_img_key(&k16) { deep_found_inline = Some(hex::encode(k16)); break; }
+                                                    }
+                                                }
+                                                if deep_found_inline.is_some() || deep_seen.len() >= DEEP_MAX_CAND_IMG { break; }
+                                            }
+                                            i = pos;
+                                        } else { break; }
+                                    }
+                                }
+                            }
+                            if deep_found_inline.is_some() { break; }
+                            offset += to_read;
+                        }
+                        deep_regions += 1;
+                        if deep_regions % 60 == 0 { println!("[dbg] deep scan progress: {} regions", deep_regions); }
+                        if deep_found_inline.is_some() { println!("[dbg] deep scan image key found; regions={}", deep_regions); break; }
+                        if deep_regions > DEEP_MAX_REGIONS { println!("[dbg] deep scan region cap reached: {}", DEEP_MAX_REGIONS); break; }
+                    }
+                    let next = (mbi.BaseAddress as usize).saturating_add(mbi.RegionSize);
+                    deep_address = if next <= deep_address { deep_address + mbi.RegionSize } else { next };
+                    if deep_found_inline.is_some() || is_extract_cancelled() { break; }
+                }
+            }
+            if deep_found_inline.is_some() { img_hex = deep_found_inline; } else { println!("[dbg] second-stage deep scan finished without image key"); }
+        }
+        // ---------------------------------------------------------------------------------------
 
         Ok((data_hex, img_hex))
     }

@@ -17,8 +17,8 @@ export interface Session {
   lastActive: string
 
   wx_key: string // new preferred data key
-  aes_key: string
-  xor_key: string
+  aes_key: string // may be empty for v3
+  xor_key: string // may be empty for v3
 
   autoSync: boolean
   syncFilters: string

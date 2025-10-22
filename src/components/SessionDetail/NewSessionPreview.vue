@@ -163,67 +163,37 @@ const clientVersionOptions = [
 const formRef = ref<FormInst | null>(null)
 const rules: FormRules = {
   name: [
-    {
-      required: true,
-      validator: (_rule, value: string) => !!(value && String(value).trim().length) || new Error('会话名称不能为空'),
-      trigger: ['input', 'blur']
-    }
+    { required: true, validator: (_r, v: string) => !!(v && v.trim().length) || new Error('会话名称不能为空'), trigger: ['input','blur'] }
   ],
   wx_id: [
-    {
-      required: true,
-      validator: (_rule, value: string) => !!(value && String(value).trim().length) || new Error('微信ID不能为空'),
-      trigger: ['input', 'blur']
-    }
+    { required: true, validator: (_r, v: string) => !!(v && v.trim().length) || new Error('微信ID不能为空'), trigger: ['input','blur'] }
   ],
   wx_acct_name: [
-    {
-      required: true,
-      validator: (_rule, value: string) => !!(value && String(value).trim().length) || new Error('昵称不能为空'),
-      trigger: ['input', 'blur']
-    }
+    { required: true, validator: (_r, v: string) => !!(v && v.trim().length) || new Error('昵称不能为空'), trigger: ['input','blur'] }
   ],
   wx_dir: [
-    {
-      required: true,
-      validator: (_rule, value: string) => !!(value && String(value).trim().length) || new Error('数据目录不能为空'),
-      trigger: ['input', 'blur']
-    }
+    { required: true, validator: (_r, v: string) => !!(v && v.trim().length) || new Error('数据目录不能为空'), trigger: ['input','blur'] }
   ],
   client_type: [
-    {
-      required: true,
-      validator: (_rule, value: string) => !!(value && String(value).trim().length) || new Error('客户端类型不能为空'),
-      trigger: ['input', 'blur']
-    }
+    { required: true, validator: (_r, v: string) => !!(v && v.trim().length) || new Error('客户端类型不能为空'), trigger: ['input','blur'] }
   ],
   client_version: [
-    {
-      required: true,
-      validator: (_rule, value: string) => !!(value && String(value).trim().length) || new Error('客户端版本不能为空'),
-      trigger: ['input', 'blur']
-    }
+    { required: true, validator: (_r, v: string) => !!(v && v.trim().length) || new Error('客户端版本不能为空'), trigger: ['input','blur'] }
   ],
   wx_key: [
-    {
-      required: true,
-      validator: (_rule, value: string) => !!(value && String(value).trim().length) || new Error('Data Key 不能为空'),
-      trigger: ['input', 'blur']
-    }
+    { required: true, validator: (_r, v: string) => !!(v && v.trim().length) || new Error('Data Key 不能为空'), trigger: ['input','blur'] }
   ],
   aes_key: [
-    {
-      required: true,
-      validator: (_rule, value: string) => !!(value && String(value).trim().length) || new Error('AES Key 不能为空'),
-      trigger: ['input', 'blur']
-    }
+    { required: false, validator: (_r, v: string) => {
+        if (editable.client_version === 'v3') { return true; }
+        return !!(v && v.trim().length) || new Error('AES Key 不能为空');
+      }, trigger: ['input','blur'] }
   ],
   xor_key: [
-    {
-      required: true,
-      validator: (_rule, value: string) => !!(value && String(value).trim().length) || new Error('XOR Key 不能为空'),
-      trigger: ['input', 'blur']
-    }
+    { required: false, validator: (_r, v: string) => {
+        if (editable.client_version === 'v3') { return true; }
+        return !!(v && v.trim().length) || new Error('XOR Key 不能为空');
+      }, trigger: ['input','blur'] }
   ]
 }
 
@@ -261,6 +231,7 @@ const avatarSrc = computed(() => {
 const handleConfirm = () => {
   formRef.value?.validate((errors) => {
     if (!errors) {
+      console.log(editable)
       emit('confirm', { ...editable })
     }
   })

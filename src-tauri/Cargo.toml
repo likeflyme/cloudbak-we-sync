@@ -63,6 +63,8 @@ windows = { version = "0.58", features = [
     "Win32_Security",
     "Win32_UI_Shell",
     "Win32_Security_Cryptography",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Diagnostics_ToolHelp",  # added for module enumeration
 ] }
 # legacy winapi for Version APIs (GetFileVersionInfo*) and low-level handle work
 winapi = { version = "0.3", features = [
@@ -76,4 +78,8 @@ winapi = { version = "0.3", features = [
 ] }
 tauri-plugin-updater = "2.9.0"
 tauri-plugin-autostart = "2"
+pbkdf2 = { version = "0.12", features = ["sha1", "sha2"] }
+sha1 = "0.10"
+yara = { version = "0.29", features = ["yara-static", "vendored"] }
+regex = "1.11"
 

@@ -383,3 +383,28 @@ pub fn find_wechat_v4_processes() -> Result<Vec<WeChatProcess>> {
 
     Ok(results)
 }
+
+pub fn find_wechat_v3_processes() -> Result<Vec<WeChatProcess>> {
+    let mut sys = System::new();
+    sys.refresh_specifics(RefreshKind::new().with_processes(ProcessRefreshKind::everything()));
+    let mut results = Vec::new();
+    for (_pid, p) in sys.processes() {
+        let name = strip_exe(p.name());
+        if name != "WeChat" { continue; }
+        let exe_path = p.exe().map(|pp| pp.to_string_lossy().to_string()).unwrap_or_default();
+        let full_version = if !exe_path.is_empty() { get_file_version(&exe_path) } else { None };
+        let (mut data_dir, mut account_name) = (None, None);
+        if let Some((d, a)) = try_infer_data_dir() { data_dir = Some(d); account_name = Some(a); }
+        let status = if data_dir.is_some() { "online" } else { "offline" }.to_string();
+        results.push(WeChatProcess {
+            pid: p.pid().as_u32() as i32,
+            exe_path,
+            version: 3,
+            status,
+            data_dir,
+            account_name,
+            full_version,
+        });
+    }
+    Ok(results)
+}

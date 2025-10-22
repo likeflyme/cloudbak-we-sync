@@ -15,6 +15,7 @@ const SALT_SIZE: usize = 16;
 const AES_BLOCK: usize = 16;
 const IV_SIZE: usize = 16;
 const V4_ITER: u32 = 256000;
+const V3_ITER: u32 = 64000; // placeholder iteration count for v3 (TODO: adjust to real value)
 const HMAC_SHA512_SIZE: usize = 64;
 const PAGE_SIZE: usize = 4096;
 
@@ -133,6 +134,73 @@ impl DBValidator {
     }
 }
 
+pub struct DBValidatorV3 {
+    first_page: Vec<u8>,
+    salt: [u8; SALT_SIZE],
+}
+
+impl DBValidatorV3 {
+    pub fn new(data_dir: &str) -> Result<Self> {
+        // Reuse logic from DBValidator.new
+        let message_dir = Path::new(data_dir).join("db_storage").join("message");
+        let mut candidates: Vec<PathBuf> = Vec::new();
+        candidates.push(message_dir.join("message_0.db"));
+        if let Ok(rd) = std::fs::read_dir(&message_dir) {
+            for ent in rd.flatten() {
+                let p = ent.path();
+                if let Some(name) = p.file_name().and_then(|s| s.to_str()) {
+                    if name.starts_with("message_") && name.ends_with(".db") && p != candidates[0] {
+                        candidates.push(p);
+                    }
+                }
+            }
+        }
+        let mut first_page: Option<Vec<u8>> = None;
+        for cand in candidates {
+            if !cand.exists() { continue; }
+            match std::fs::File::open(&cand).and_then(|mut f| { use std::io::Read; let mut page = vec![0u8; PAGE_SIZE]; f.read_exact(&mut page)?; Ok(page) }) {
+                Ok(buf) => {
+                    if &buf[..15] == b"SQLite format 3" { continue; } // skip already decrypted
+                    println!("[dbg] (v3) Using DB file: {}", cand.to_string_lossy());
+                    first_page = Some(buf);
+                    break;
+                }
+                Err(_) => continue,
+            }
+        }
+        let first_page = first_page.ok_or_else(|| anyhow::anyhow!("(v3) No suitable encrypted message_*.db found"))?;
+        let mut salt = [0u8; SALT_SIZE];
+        salt.copy_from_slice(&first_page[..SALT_SIZE]);
+        Ok(Self { first_page, salt })
+    }
+
+    fn derive_keys(&self, db_key: &[u8; KEY_SIZE]) -> ([u8; KEY_SIZE], [u8; KEY_SIZE]) {
+        let mut enc_key = [0u8; KEY_SIZE];
+        // PBKDF2 for v3 (placeholder iterations)
+        DBValidator::pbkdf2_hmac_sha512(db_key, &self.salt, V3_ITER as u64, &mut enc_key)
+            .expect("PBKDF2 v3 enc_key failed");
+        let mut mac_salt = [0u8; SALT_SIZE];
+        for i in 0..SALT_SIZE { mac_salt[i] = self.salt[i] ^ 0x3a; }
+        let mut mac_key = [0u8; KEY_SIZE];
+        DBValidator::pbkdf2_hmac_sha512(&enc_key, &mac_salt, 2u64, &mut mac_key)
+            .expect("PBKDF2 v3 mac_key failed");
+        (enc_key, mac_key)
+    }
+
+    pub fn validate_db_key_v3(&self, key: &[u8]) -> bool {
+        if key.len() != KEY_SIZE { return false; }
+        let mut k = [0u8; KEY_SIZE]; k.copy_from_slice(key);
+        let (_enc_key, mac_key) = self.derive_keys(&k);
+        let data_end = PAGE_SIZE - (IV_SIZE + HMAC_SHA512_SIZE) + IV_SIZE;
+        let mut mac = Hmac::<Sha512>::new_from_slice(&mac_key).unwrap();
+        mac.update(&self.first_page[SALT_SIZE..data_end]);
+        mac.update(&(1u32.to_le_bytes()));
+        let calc = mac.finalize().into_bytes();
+        let stored = &self.first_page[data_end..data_end+HMAC_SHA512_SIZE];
+        subtle::ConstantTimeEq::ct_eq(&calc[..], stored).unwrap_u8() == 1
+    }
+}
+
 pub struct ImgKeyValidator {
     encrypted_block: Option<[u8; 16]>,
 }
@@ -175,6 +243,8 @@ impl ImgKeyValidator {
             if !name.ends_with(".dat") { continue; }
             let is_thumb = name.ends_with("_t.dat");
             total_dat += 1;
+            if total_dat % 1000 == 0 { println!("[dbg] ImgKey scan progress: {} .dat files", total_dat); }
+            if enc.is_some() { break; } // early stop once we have a block candidate
 
             // Read small header
             let mut hdr = [0u8; 4];
@@ -222,6 +292,8 @@ impl ImgKeyValidator {
     pub fn validate_img_key(&self, key: &[u8]) -> bool {
         use aes::cipher::{BlockDecrypt, KeyInit};
         use aes::Aes128;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static MISS_COUNT: AtomicUsize = AtomicUsize::new(0);
         if self.encrypted_block.is_none() || key.len() < 16 { return false; }
         let mut blk = aes::cipher::generic_array::GenericArray::from(self.encrypted_block.unwrap());
         let k = aes::cipher::generic_array::GenericArray::from_slice(&key[..16]);
@@ -230,8 +302,10 @@ impl ImgKeyValidator {
         let dec = blk.as_slice();
         let ok = dec.starts_with(b"\xFF\xD8\xFF") || dec.starts_with(b"wxgf");
         if cfg!(debug_assertions) && !ok {
-            // print a small hint without leaking data content
-            println!("[dbg] decrypt miss (first 4) = {:02x?}", &dec[..4]);
+            let n = MISS_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+            if n <= 10 || n % 500 == 0 { // only first 10 and then every 500th miss
+                println!("[dbg] decrypt miss #{} (first 4) = {:02x?}", n, &dec[..4]);
+            }
         }
         ok
     }

@@ -166,7 +166,7 @@ provide('getSessionById', getSessionById)
 const showAddDialog = async () => {
   selected.value = null
 
-  const ok = window.confirm('是否开始扫描并添加微信会话？\n请确保已登录且微信 v4 正在运行。')
+  const ok = window.confirm('是否开始扫描并添加微信会话？\n请确保已登录且微信正在运行。')
   if (!ok) return
 
   isAddingSession.value = true

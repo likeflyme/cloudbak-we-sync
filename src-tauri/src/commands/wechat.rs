@@ -5,7 +5,10 @@ use once_cell::sync::Lazy;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 #[cfg(target_os = "windows")]
-static EXTRACT_CANCEL_FLAG: Lazy<AtomicBool> = Lazy::new(|| AtomicBool::new(false));
+pub static EXTRACT_CANCEL_FLAG: Lazy<AtomicBool> = Lazy::new(|| AtomicBool::new(false));
+
+#[cfg(target_os = "windows")]
+pub fn is_extract_cancelled() -> bool { EXTRACT_CANCEL_FLAG.load(Ordering::Relaxed) }
 
 #[tauri::command]
 #[cfg(target_os = "windows")]
@@ -18,90 +21,71 @@ pub async fn cancel_extract_wechat_keys() -> Result<(), String> {
 #[tauri::command]
 #[cfg(target_os = "windows")]
 pub async fn extract_wechat_keys(data_dir: Option<String>) -> Result<serde_json::Value, String> {
-    use crate::internal::windows::{winproc, memory, dat2img};
-    use anyhow::Result;
-    tracing::info!(?data_dir, "extract_wechat_keys invoked");
+    use crate::internal::wechat;
+    // reset cancel flag at start
+    EXTRACT_CANCEL_FLAG.store(false, Ordering::Relaxed);
+    tracing::info!(?data_dir, "extract_wechat_keys invoked (unified)");
+    match wechat::extract_any() {
+        Ok(keys) => Ok(keys.to_json()),
+        Err(e) => Ok(crate::internal::wechat::common::types::WechatKeys::fail(&e.to_string()))
+    }
+}
 
-    fn cancelled() -> bool { EXTRACT_CANCEL_FLAG.load(Ordering::Relaxed) }
-
-    fn cancel_resp() -> serde_json::Value { serde_json::json!({"ok": false, "error": "用户已取消"}) }
-
-    EXTRACT_CANCEL_FLAG.store(false, Ordering::Relaxed); // 开始前重置
-
-    fn inner(mut data_dir: Option<String>) -> Result<serde_json::Value> {
-        if cancelled() { return Ok(cancel_resp()); }
-        let mut procs = winproc::find_wechat_v4_processes()?;
-        tracing::debug!(count = procs.len(), "found wechat processes");
-        if cancelled() { return Ok(cancel_resp()); }
-        if procs.is_empty() {
-            return Ok(serde_json::json!({
-                "ok": false,
-                "error": "没有找到微信进程"
-            }));
-        }
-        if let Some(ref dir) = data_dir {
-            for p in &mut procs { p.data_dir = Some(dir.clone()); }
-        }
-        let selected = procs
-            .iter()
-            .find(|p| p.status == "online" && p.data_dir.is_some())
-            .cloned()
-            .or_else(|| {
-                let mut p = procs.into_iter().next().unwrap();
-                if p.data_dir.is_none() { p.data_dir = data_dir.take(); }
-                Some(p)
-            })
-            .unwrap();
-        if cancelled() { return Ok(cancel_resp()); }
-        tracing::info!(pid = selected.pid, status = %selected.status, data_dir = ?selected.data_dir, acct = ?selected.account_name, "wechat process selected");
-
-        let (data_key_hex, img_key_hex) = memory::extract_keys_windows(&selected)?;
-        if cancelled() { return Ok(cancel_resp()); }
-        tracing::debug!(has_data_key = data_key_hex.is_some(), has_img_key = img_key_hex.is_some(), "keys extracted");
-        let mut xor_key: Option<u8> = None;
-        if let Some(dir) = selected.data_dir.as_deref() {
-            if cancelled() { return Ok(cancel_resp()); }
-            xor_key = dat2img::scan_and_set_xor_key(dir)?;
-        }
-        if cancelled() { return Ok(cancel_resp()); }
-        let data_dir: Option<String> = selected.data_dir.clone();
-        let wx_id: Option<String> = selected.account_name.clone();
-        let mut head_img: Option<String> = None;
-        if let (Some(data_dir), Some(data_key_hex), Some(wx_id)) = (data_dir, data_key_hex.clone(), wx_id) {
-            if !cancelled() {
-                use crate::internal::windows::avatar;
-                head_img = avatar::extract_avatar_to_appdata(&data_dir, &data_key_hex, &wx_id);
+#[tauri::command]
+#[cfg(target_os = "windows")]
+pub async fn extract_wechat_v3_avatar(wx_id: String, data_dir: String) -> Result<serde_json::Value, String> {
+    use std::path::PathBuf;
+    use base64::Engine;
+    tracing::info!(%wx_id, %data_dir, "extract_wechat_v3_avatar invoked");
+    let mut db_path = PathBuf::from(&data_dir);
+    db_path.push("Msg");
+    db_path.push("Misc.db");
+    let file_bytes = match std::fs::read(&db_path) {
+        Ok(b) => b,
+        Err(e) => return Ok(serde_json::json!({"ok": false, "error": format!("read Misc.db failed: {}", e)})),
+    };
+    let needle = wx_id.as_bytes();
+    let mut avatar_data: Option<Vec<u8>> = None;
+    // Signatures moved to outer scope so we can reuse after loop
+    const PNG_SIG: &[u8] = b"\x89PNG\r\n\x1a\n";
+    const JPG_SIG: &[u8] = b"\xFF\xD8\xFF";
+    const GIF_SIG: &[u8] = b"GIF"; // ASCII GIF87a / GIF89a header prefix
+    // Heuristic scan: find usrName then search forward for image signatures within a window
+    let mut search_pos = 0usize;
+    while let Some(pos) = memchr::memmem::find(&file_bytes[search_pos..], needle) {
+        let global_pos = search_pos + pos;
+        let window_start = global_pos;
+        let window_end = std::cmp::min(global_pos + 200_000, file_bytes.len());
+        let slice = &file_bytes[window_start..window_end];
+        if let Some(p) = memchr::memmem::find(slice, PNG_SIG) {
+            if let Some(iend_rel) = memchr::memmem::find(&slice[p..], b"IEND\xAE\x42\x60\x82") {
+                let end = p + iend_rel + 8;
+                avatar_data = Some(slice[p..end].to_vec());
+                break;
             }
         }
-        if cancelled() { return Ok(cancel_resp()); }
-        tracing::debug!(has_head_img = head_img.is_some(), "avatar extraction done");
-        let client_type = "win";
-        let client_version = selected
-            .full_version
-            .as_ref()
-            .and_then(|v| v.split('.').next())
-            .map(|maj| if maj == "4" { "v4" } else if maj == "3" { "v3" } else { "unknown" })
-            .unwrap_or("unknown");
-
-        Ok(serde_json::json!({
-            "ok": true,
-            "pid": selected.pid,
-            "fullVersion": selected.full_version,
-            "dataDir": selected.data_dir,
-            "accountName": selected.account_name,
-            "dataKey": data_key_hex,
-            "imageKey": img_key_hex,
-            "xorKey": xor_key,
-            "clientType": client_type,
-            "clientVersion": client_version,
-            "headImg": head_img
-        }))
+        if avatar_data.is_none() {
+            if let Some(p) = memchr::memmem::find(slice, JPG_SIG) {
+                if let Some(mut end_idx) = memchr::memmem::find(&slice[p+3..], b"\xFF\xD9") { end_idx += p+3+2; avatar_data = Some(slice[p..end_idx].to_vec()); break; }
+            }
+        }
+        if avatar_data.is_none() {
+            if let Some(p) = memchr::memmem::find(slice, GIF_SIG) {
+                if p + 6 < slice.len() && ( &slice[p..p+6] == b"GIF89a" || &slice[p..p+6] == b"GIF87a") {
+                    let gif_tail_slice = &slice[p..std::cmp::min(p+120_000, slice.len())];
+                    if let Some(rel_end) = gif_tail_slice.iter().rposition(|&b| b==0x3B) { avatar_data = Some(gif_tail_slice[..=rel_end].to_vec()); break; }
+                }
+            }
+        }
+        search_pos = global_pos + needle.len();
     }
-
-    tauri::async_runtime::spawn_blocking(move || inner(data_dir))
-        .await
-        .map_err(|e| e.to_string())?
-        .map_err(|e| e.to_string())
+    if let Some(img) = avatar_data {
+        let (mime, _) = if img.starts_with(PNG_SIG) { ("image/png", true) } else if img.starts_with(JPG_SIG) { ("image/jpeg", true) } else if img.starts_with(GIF_SIG) { ("image/gif", true) } else { ("application/octet-stream", false) };
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&img);
+        Ok(serde_json::json!({"ok": true, "avatar": format!("data:{};base64,{}", mime, b64) }))
+    } else {
+        Ok(serde_json::json!({"ok": false, "error": "avatar not found heuristically"}))
+    }
 }
 
 
