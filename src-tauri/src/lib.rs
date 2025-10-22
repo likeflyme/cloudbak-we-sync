@@ -9,6 +9,7 @@ use tauri::Manager; // bring trait for window access
 use tauri::tray::{TrayIconBuilder, TrayIconEvent, MouseButton};
 use tauri::menu::{MenuBuilder, MenuItemBuilder};
 use tracing_subscriber::prelude::*; // for .with chaining
+use tauri::Emitter; // 添加事件发送
 
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -49,7 +50,7 @@ pub fn run() {
 
             // 构建托盘菜单 (Tauri v2 API)
             let show_item = MenuItemBuilder::with_id("show", "显示主窗口").build(app)?;
-            let quit_item = MenuItemBuilder::with_id("quit", "退出 We Sync").build(app)?;
+            let quit_item = MenuItemBuilder::with_id("quit", "退出").build(app)?;
             let menu = MenuBuilder::new(app)
                 .item(&show_item)
                 .separator()
@@ -68,6 +69,7 @@ pub fn run() {
                         TrayIconEvent::Click { button: MouseButton::Left, .. } | TrayIconEvent::DoubleClick { .. } => {
                             let app = tray.app_handle();
                             if let Some(w) = app.get_webview_window("main") { let _ = w.show(); let _ = w.set_focus(); }
+                            let _ = app.emit("tray-show", &serde_json::json!({"ts": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis()}));
                         }
                         _ => {}
                     }

@@ -1,4 +1,20 @@
 // New: expose a command to extract WeChat v4 keys on Windows
+#[cfg(target_os = "windows")]
+use once_cell::sync::Lazy;
+#[cfg(target_os = "windows")]
+use std::sync::atomic::{AtomicBool, Ordering};
+
+#[cfg(target_os = "windows")]
+static EXTRACT_CANCEL_FLAG: Lazy<AtomicBool> = Lazy::new(|| AtomicBool::new(false));
+
+#[tauri::command]
+#[cfg(target_os = "windows")]
+pub async fn cancel_extract_wechat_keys() -> Result<(), String> {
+    EXTRACT_CANCEL_FLAG.store(true, Ordering::Relaxed);
+    tracing::info!("cancel_extract_wechat_keys invoked; flag set");
+    Ok(())
+}
+
 #[tauri::command]
 #[cfg(target_os = "windows")]
 pub async fn extract_wechat_keys(data_dir: Option<String>) -> Result<serde_json::Value, String> {
@@ -6,9 +22,17 @@ pub async fn extract_wechat_keys(data_dir: Option<String>) -> Result<serde_json:
     use anyhow::Result;
     tracing::info!(?data_dir, "extract_wechat_keys invoked");
 
+    fn cancelled() -> bool { EXTRACT_CANCEL_FLAG.load(Ordering::Relaxed) }
+
+    fn cancel_resp() -> serde_json::Value { serde_json::json!({"ok": false, "error": "用户已取消"}) }
+
+    EXTRACT_CANCEL_FLAG.store(false, Ordering::Relaxed); // 开始前重置
+
     fn inner(mut data_dir: Option<String>) -> Result<serde_json::Value> {
+        if cancelled() { return Ok(cancel_resp()); }
         let mut procs = winproc::find_wechat_v4_processes()?;
         tracing::debug!(count = procs.len(), "found wechat processes");
+        if cancelled() { return Ok(cancel_resp()); }
         if procs.is_empty() {
             return Ok(serde_json::json!({
                 "ok": false,
@@ -28,24 +52,30 @@ pub async fn extract_wechat_keys(data_dir: Option<String>) -> Result<serde_json:
                 Some(p)
             })
             .unwrap();
+        if cancelled() { return Ok(cancel_resp()); }
         tracing::info!(pid = selected.pid, status = %selected.status, data_dir = ?selected.data_dir, acct = ?selected.account_name, "wechat process selected");
 
         let (data_key_hex, img_key_hex) = memory::extract_keys_windows(&selected)?;
+        if cancelled() { return Ok(cancel_resp()); }
         tracing::debug!(has_data_key = data_key_hex.is_some(), has_img_key = img_key_hex.is_some(), "keys extracted");
         let mut xor_key: Option<u8> = None;
         if let Some(dir) = selected.data_dir.as_deref() {
+            if cancelled() { return Ok(cancel_resp()); }
             xor_key = dat2img::scan_and_set_xor_key(dir)?;
         }
+        if cancelled() { return Ok(cancel_resp()); }
         let data_dir: Option<String> = selected.data_dir.clone();
         let wx_id: Option<String> = selected.account_name.clone();
         let mut head_img: Option<String> = None;
         if let (Some(data_dir), Some(data_key_hex), Some(wx_id)) = (data_dir, data_key_hex.clone(), wx_id) {
-            use crate::internal::windows::avatar;
-            head_img = avatar::extract_avatar_to_appdata(&data_dir, &data_key_hex, &wx_id);
+            if !cancelled() {
+                use crate::internal::windows::avatar;
+                head_img = avatar::extract_avatar_to_appdata(&data_dir, &data_key_hex, &wx_id);
+            }
         }
+        if cancelled() { return Ok(cancel_resp()); }
         tracing::debug!(has_head_img = head_img.is_some(), "avatar extraction done");
-        // client type/version
-        let client_type = "win"; // current project only supports Windows extraction
+        let client_type = "win";
         let client_version = selected
             .full_version
             .as_ref()

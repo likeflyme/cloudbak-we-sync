@@ -49,8 +49,13 @@
 
       <!-- 右侧内容区域 -->
       <n-layout-content class="main-content">
-        <!-- 移除更新面板 -->
-        <LoadingState v-if="isAddingSession" />
+        <!-- 调整：取消按钮放到加载组件内部文字下方，用 a 样式 -->
+        <div v-if="isAddingSession" class="extracting-wrap">
+          <LoadingState />
+          <div class="cancel-inline">
+            <a href="javascript:" class="cancel-link" @click="cancelExtraction" v-if="canCancel">取消</a>
+          </div>
+        </div>
         <NewSessionPreview 
           v-else-if="newSessionData" 
           :session-data="newSessionData"
@@ -85,6 +90,7 @@ import { getVersion } from '@tauri-apps/api/app'
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-ignore
 import { check } from '@tauri-apps/plugin-updater'
+import { listen } from '@tauri-apps/api/event'
 
 // 导入组件
 import SessionSidebar from '@/components/Session/SessionSidebar.vue'
@@ -99,6 +105,8 @@ const sessions = ref<Session[]>([])
 
 const selected = ref<Session | null>(null)
 const isAddingSession = ref(false)
+const extractionCancelled = ref(false)
+const canCancel = computed(() => isAddingSession.value && !extractionCancelled.value)
 const newSessionData = ref<PartialSession | null>(null)
 const showAboutDialog = ref(false)
 const appVersion = ref<string>('未知')
@@ -116,6 +124,11 @@ onMounted(async () => {
   } catch(e) {
     console.error('获取应用版本失败:', e)
   }
+  // 监听托盘显示事件刷新主界面（使用标志防并发重复）
+  listen('tray-show', () => {
+    if (isLoadingSessions.value) { pendingTrayRefresh = true; return }
+    loadSessions()
+  })
 })
 
 // 计算客户端版本号（关于我们用软件版本号）
@@ -157,8 +170,11 @@ const showAddDialog = async () => {
   if (!ok) return
 
   isAddingSession.value = true
+  extractionCancelled.value = false
+  newSessionData.value = null
   try {
     const res: any = await invoke('extract_wechat_keys', { dataDir: null })
+    if (extractionCancelled.value) { return } // 用户已取消，不再处理结果
     if (res?.ok) {
       const account = res.accountName || '未知账号'
 
@@ -194,6 +210,7 @@ const showAddDialog = async () => {
       if (res.headImg) {
         try {
           const avatarData: string = await invoke('load_avatar', { path: res.headImg })
+          if (extractionCancelled.value) { return } // 用户已取消，不再处理结果
           if (avatarData) {
             draft.avatar = avatarData
           }
@@ -202,17 +219,22 @@ const showAddDialog = async () => {
         }
       }
 
-      newSessionData.value = draft
+      if (!extractionCancelled.value) { newSessionData.value = draft }
     } else {
-      const msg = res?.error || '提取失败，未返回可用数据'
-      alert(msg)
+      if (!extractionCancelled.value) { alert(res?.error || '提取失败，未返回可用数据') }
     }
   } catch (e: any) {
-    console.error('extract_wechat_keys 调用失败:', e)
-    alert(`调用失败: ${e?.message || String(e)}`)
+    if (!extractionCancelled.value) { alert(`调用失败: ${e?.message || String(e)}`) }
   } finally {
-    isAddingSession.value = false
+    if (!extractionCancelled.value) { isAddingSession.value = false }
   }
+}
+
+const cancelExtraction = () => {
+  extractionCancelled.value = true
+  isAddingSession.value = false
+  newSessionData.value = null
+  try { invoke('cancel_extract_wechat_keys') } catch {}
 }
 
 // 取消添加（返回列表，不写入）
@@ -241,13 +263,19 @@ const confirmAdd = (sessionData: PartialSession) => {
   }
 }
 
+const isLoadingSessions = ref(false)
+let pendingTrayRefresh = false
+
 const loadSessions = () => {
+  if (isLoadingSessions.value) { return }
+  isLoadingSessions.value = true
   getSessions().then((data) => {
-    if (data) {
-      for (const d of data as Session[]) {
-        sessions.value.push(d)
-      }
-    }
+    const list: Session[] = Array.isArray(data) ? data as Session[] : []
+    // 去重依据 id
+    const uniq: Session[] = []
+    const seen = new Set<number>()
+    for (const s of list) { if (s && typeof s.id === 'number' && !seen.has(s.id)) { seen.add(s.id); uniq.push(s) } }
+    sessions.value = uniq
     // initialize auto sync watchers for sessions marked auto_sync
     try {
       const userId = Number(localStorage.getItem('user_id') || '0')
@@ -257,6 +285,12 @@ const loadSessions = () => {
         invoke('init_user_auto_sync', { userId, baseUrl, token: t }).catch(() => {})
       }
     } catch {}
+  }).finally(() => {
+    isLoadingSessions.value = false
+    if (pendingTrayRefresh) { // 若托盘事件在加载过程中触发，加载结束后再刷新一次
+      pendingTrayRefresh = false
+      loadSessions()
+    }
   })
 }
 
@@ -362,29 +396,8 @@ loadSessions()
 .update-panel .notes { background: #f8f8f8; padding: 8px; white-space: pre-wrap; font-size: 12px; border-radius: 4px; }
 .update-panel .actions { display: flex; gap: 8px; margin-top: 8px; }
 
-.update-toast {
-  position: fixed; /* 使用 fixed 保证相对窗口定位 */
-  top: 8px;
-  right: 70px;
-  background: #fffbe6;
-  border: 1px solid #ffecb3;
-  padding: 6px 10px;
-  font-size: 12px;
-  border-radius: 4px;
-  box-shadow: 0 2px 6px rgba(0,0,0,0.12);
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  cursor: pointer;
-  z-index: 1000; /* 比 header (z-index:10) 更高 */
-}
-.update-toast .close {
-  background: transparent;
-  border: none;
-  font-size: 14px;
-  line-height: 1;
-  cursor: pointer;
-  color: #999;
-}
-.update-toast .close:hover { color: #666; }
+.cancel-inline { text-align: center; margin-top: -320px; /* roughly position below spin description */ }
+.cancel-link { display: inline-block; margin-top: 12px; font-size: 13px; color: #409eff; text-decoration: underline; cursor: pointer; }
+.cancel-link:hover { color: #66b1ff; }
+.extracting-wrap { position: relative; }
 </style>

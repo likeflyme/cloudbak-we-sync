@@ -1,6 +1,6 @@
 [package]
 name = "we-sync"
-version = "1.0.2"
+version = "1.0.1"
 description = "A Tauri App"
 authors = ["you"]
 edition = "2021"
