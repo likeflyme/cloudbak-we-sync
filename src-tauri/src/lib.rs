@@ -10,6 +10,8 @@ use tauri::tray::{TrayIconBuilder, TrayIconEvent, MouseButton};
 use tauri::menu::{MenuBuilder, MenuItemBuilder};
 use tracing_subscriber::prelude::*; // for .with chaining
 use tauri::Emitter; // 添加事件发送
+use once_cell::sync::OnceCell; // added for persistent log guard
+static LOG_GUARD: OnceCell<tracing_appender::non_blocking::WorkerGuard> = OnceCell::new();
 
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -31,12 +33,14 @@ pub fn run() {
             let log_dir = crate::internal::app_paths::app_data_dir().map(|p| p.join("logs")).unwrap_or(std::env::temp_dir().join("we-sync-logs"));
             std::fs::create_dir_all(&log_dir).ok();
             let file_appender = tracing_appender::rolling::daily(&log_dir, "app.log");
-            let (nb_writer, _guard) = tracing_appender::non_blocking(file_appender);
+            let (nb_writer, guard) = tracing_appender::non_blocking(file_appender); // keep guard alive
+            let _ = LOG_GUARD.set(guard); // store guard so background worker isn't dropped
             let fmt_layer = tracing_subscriber::fmt::layer()
                 .with_target(true)
                 .with_line_number(true)
                 .with_file(true)
                 .with_thread_ids(true)
+                .with_ansi(false) // disable ANSI in file output
                 .with_writer(nb_writer);
             let console_layer = tracing_subscriber::fmt::layer().with_target(true).with_ansi(true);
             let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()

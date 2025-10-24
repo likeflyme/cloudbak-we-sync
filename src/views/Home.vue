@@ -176,8 +176,6 @@ const showAddDialog = async () => {
     const res: any = await invoke('extract_wechat_keys', { dataDir: null })
     if (extractionCancelled.value) { return } // 用户已取消，不再处理结果
     if (res?.ok) {
-      const account = res.accountName || '未知账号'
-
       let dataDir = res.dataDir as string | null
       if (dataDir && dataDir.startsWith('\\\\?\\')) {
         dataDir = dataDir.slice(4)

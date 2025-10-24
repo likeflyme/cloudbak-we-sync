@@ -60,6 +60,7 @@ import type { Session } from '@/models/session'
 import { deleteSession as deleteSessionFromServer } from '@/api/user'
 import { invoke } from '@tauri-apps/api/core'
 import { endpoint, token as getToken } from '@/common/login'
+import { decrypt } from '@/api/task' // 新增: 同步完成后调用解密任务
 
 const userId = Number(localStorage.getItem('user_id') || '0')
 
@@ -85,6 +86,7 @@ const syncStatus = ref<{ state: string; scanned: number; to_upload: number; uplo
   state: 'idle', scanned: 0, to_upload: 0, uploaded: 0, skipped: 0, failed: 0
 })
 let pollTimer: number | null = null
+const manualSyncInProgress = ref(false) // 新增: 标记本次是否为手动同步
 
 const isRunning = computed(() => syncStatus.value.state === 'running')
 const statusType = computed(() => {
@@ -116,11 +118,26 @@ const startPolling = () => {
       if (st.state === 'done' || st.state === 'stopped' || st.state === 'error') {
         syncing.value = false
         stopPolling()
+        // 新增: 若为手动同步且成功完成则调用后端解析
+        if (st.state === 'done' && manualSyncInProgress.value && session.value) {
+          try {
+            await decrypt(session.value.id)
+            message.success('解析任务已启动')
+          } catch (e: any) {
+            console.error('decrypt error', e)
+            message.error(e?.message || '解析任务启动失败')
+          } finally {
+            manualSyncInProgress.value = false
+          }
+        } else if (st.state !== 'running') {
+          manualSyncInProgress.value = false
+        }
       }
     } catch (e) {
       // stop polling on error
       stopPolling()
       syncing.value = false
+      manualSyncInProgress.value = false
     }
   }, 600)
 }
@@ -246,6 +263,7 @@ const handleSync = async (key: string) => {
     })
     taskId.value = id
     syncing.value = true
+    manualSyncInProgress.value = true // 新增: 标记为手动同步
     syncStatus.value = { state: 'running', scanned: 0, to_upload: 0, uploaded: 0, skipped: 0, failed: 0 }
     startPolling()
   } catch (e) {
