@@ -114,25 +114,26 @@ fn fetch_remote_map_blocking(client: &reqwest::blocking::Client, base_url: &str,
     Ok(map)
 }
 
-fn upload_one_blocking(client: &reqwest::blocking::Client, base_url: &str, sys_session_id: i32, root: &Path, file_path: &Path) -> Result<()> {
+fn upload_one_blocking(client: &reqwest::blocking::Client, base_url: &str, sys_session_id: i32, root: &Path, file_path: &Path, is_auto: bool) -> Result<()> {
     let dest_path = normalize_rel(root, file_path);
     let url = format!("{}/sync/upload", base_url.trim_end_matches('/'));
     let file_bytes = std::fs::read(file_path)?;
     let local_mtime_ms = std::fs::metadata(file_path).ok().map(|m| file_mtime_millis(&m)).unwrap_or(0);
-    tracing::trace!(session_id = sys_session_id, file = %dest_path, size = file_bytes.len(), mtime = local_mtime_ms, "upload_one_blocking start");
+    tracing::trace!(session_id = sys_session_id, file = %dest_path, size = file_bytes.len(), mtime = local_mtime_ms, is_auto, "upload_one_blocking start");
     let part = reqwest::blocking::multipart::Part::bytes(file_bytes).file_name(Path::new(&dest_path).file_name().and_then(|s| s.to_str()).unwrap_or("file").to_string());
-    let form = reqwest::blocking::multipart::Form::new()
+    let mut form = reqwest::blocking::multipart::Form::new()
         .text("dest_path", dest_path.clone())
         .text("sys_session_id", sys_session_id.to_string())
         .text("overwrite", "true")
         .text("client_mtime", local_mtime_ms.to_string())
         .part("file", part);
+    if is_auto { form = form.text("is_auto", "true"); }
     let resp = client.post(url).multipart(form).send()?;
     if !resp.status().is_success() {
-        tracing::warn!(session_id = sys_session_id, file = %dest_path, status = ?resp.status(), "upload failed status");
+        tracing::warn!(session_id = sys_session_id, file = %dest_path, status = ?resp.status(), is_auto, "upload failed status");
         anyhow::bail!("upload failed: {}", resp.status());
     }
-    tracing::trace!(session_id = sys_session_id, file = %dest_path, "upload success");
+    tracing::trace!(session_id = sys_session_id, file = %dest_path, is_auto, "upload success");
     Ok(())
 }
 
@@ -266,7 +267,7 @@ fn spawn_watcher(session_id: i32, user_id: i32, root: PathBuf, base_url: String,
                 let overdue = last_upload.get(&rel).map(|t| now.duration_since(*t) > Duration::from_millis(800)).unwrap_or(true);
                 if !overdue { continue; }
                 last_upload.insert(rel.clone(), now);
-                let _ = upload_one_blocking(&client, &base_url, session_id, &root, &path);
+                let _ = upload_one_blocking(&client, &base_url, session_id, &root, &path, true);
                 tracing::trace!(session_id, file = %rel, "auto-sync uploaded changed file");
             }
         }
@@ -411,7 +412,7 @@ pub async fn start_sync(
                  let mut s = task.status.lock();
                  s.current = Some(rel.clone());
              }
-             match upload_one_blocking(&client, &base_url, sys_session_id, &root, &file) {
+             match upload_one_blocking(&client, &base_url, sys_session_id, &root, &file, false) {
                  Ok(_) => {
                      let mut s = task.status.lock();
                      s.uploaded += 1;

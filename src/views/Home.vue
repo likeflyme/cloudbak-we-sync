@@ -182,6 +182,7 @@ const showAddDialog = async () => {
       if (dataDir && dataDir.startsWith('\\\\?\\')) {
         dataDir = dataDir.slice(4)
       }
+      const wx_id = dataDir?.split('\\').pop() || '';
 
       const clientType = res.clientType || 'win'
       const clientVersion = res.clientVersion || ''
@@ -190,7 +191,7 @@ const showAddDialog = async () => {
       const draft: PartialSession = {
         name: '',
         desc: '',
-        wx_id: account || '',
+        wx_id: wx_id || '',
         wx_acct_name: '',
         wx_mobile: '',
         wx_email: '',

@@ -244,7 +244,8 @@ impl ImgKeyValidator {
             let is_thumb = name.ends_with("_t.dat");
             total_dat += 1;
             if total_dat % 1000 == 0 { println!("[dbg] ImgKey scan progress: {} .dat files", total_dat); }
-            if enc.is_some() { break; } // early stop once we have a block candidate
+            // EARLY STOP: if already picked, break to avoid scanning rest
+            if enc.is_some() { break; }
 
             // Read small header
             let mut hdr = [0u8; 4];
@@ -256,7 +257,18 @@ impl ImgKeyValidator {
             if &hdr == b"\x07\x08\x56\x32" {
                 v632_dat += 1;
                 if is_thumb { cand_v632_thumb.push(e.path().to_path_buf()); }
-                else { cand_v632_main.push(e.path().to_path_buf()); }
+                else {
+                    cand_v632_main.push(e.path().to_path_buf());
+                    // Prefer first v632 main image: try immediately and early-break if success
+                    if enc.is_none() {
+                        if let Some(blk) = read_block(e.path()) {
+                            picked = Some(e.path().to_path_buf());
+                            enc = Some(blk);
+                            println!("[dbg] Early img encrypted block picked (v632 main): {}", e.path().display());
+                            break; // early stop scanning
+                        }
+                    }
+                }
             } else if &hdr == b"\x07\x08\x56\x31" {
                 v631_dat += 1;
                 if is_thumb { cand_v631_thumb.push(e.path().to_path_buf()); }
@@ -264,14 +276,16 @@ impl ImgKeyValidator {
             }
         }
 
-        // Try in order: v632 main -> v632 thumb -> v631 main -> v631 thumb
-        for lst in [&cand_v632_main, &cand_v632_thumb, &cand_v631_main, &cand_v631_thumb] {
-            if enc.is_some() { break; }
-            for p in lst {
-                if let Some(blk) = read_block(p) {
-                    picked = Some(p.clone());
-                    enc = Some(blk);
-                    break;
+        // Only run fallback candidate search if early pick not found
+        if enc.is_none() {
+            for lst in [&cand_v632_main, &cand_v632_thumb, &cand_v631_main, &cand_v631_thumb] {
+                if enc.is_some() { break; }
+                for p in lst {
+                    if let Some(blk) = read_block(p) {
+                        picked = Some(p.clone());
+                        enc = Some(blk);
+                        break;
+                    }
                 }
             }
         }
