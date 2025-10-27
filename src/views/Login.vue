@@ -13,12 +13,13 @@
         {{ error_msg }}
       </n-alert>
 
-      <n-form ref="formRef" :model="form" :rules="rules" size="large">
+      <n-form ref="formRef" :model="form" :rules="rules" size="large" @keydown.enter.prevent="login">
         <n-form-item label="服务器地址" path="endpoint">
           <n-input
             v-model:value="form.endpoint"
             placeholder="例如：https://192.168.1.10:443"
             clearable
+            @keyup.enter.prevent="login"
           />
         </n-form-item>
 
@@ -28,6 +29,7 @@
             placeholder="用户名或邮箱"
             clearable
             autofocus
+            @keyup.enter.prevent="login"
           />
         </n-form-item>
 
@@ -37,6 +39,7 @@
             type="password"
             show-password-on="mousedown"
             placeholder="填写密码"
+            @keyup.enter.prevent="login"
           />
         </n-form-item>
 

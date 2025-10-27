@@ -23,3 +23,4 @@ dist-ssr
 *.sw?
 .vscode
 wechat-dump-rs-4
+chatlog
