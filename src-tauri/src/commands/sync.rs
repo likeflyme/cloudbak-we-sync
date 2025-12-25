@@ -122,7 +122,7 @@ fn upload_one_blocking(client: &reqwest::blocking::Client, base_url: &str, sys_s
     tracing::trace!(session_id = sys_session_id, file = %dest_path, size = file_size, mtime = local_mtime_ms, is_auto, "upload_one_blocking start");
     let file_name = Path::new(&dest_path).file_name().and_then(|s| s.to_str()).unwrap_or("file").to_string();
     let file_handle = std::fs::File::open(file_path)?;
-    let part = reqwest::blocking::multipart::Part::stream_with_length(file_handle, file_size)
+    let part = reqwest::blocking::multipart::Part::reader_with_length(file_handle, file_size)
         .file_name(file_name);
     let mut form = reqwest::blocking::multipart::Form::new()
         .text("dest_path", dest_path.clone())
