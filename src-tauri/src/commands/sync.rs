@@ -129,7 +129,21 @@ fn upload_one_blocking(client: &reqwest::blocking::Client, base_url: &str, sys_s
         .text("client_mtime", local_mtime_ms.to_string())
         .part("file", part);
     if is_auto { form = form.text("is_auto", "true"); }
-    let resp = client.post(url).multipart(form).send()?;
+    let resp = match client.post(url).multipart(form).send() {
+        Ok(r) => r,
+        Err(e) => {
+            use std::error::Error as StdError;
+            let mut chain = String::new();
+            let mut src = e.source();
+            while let Some(s) = src {
+                chain.push_str(" -> ");
+                chain.push_str(&format!("{}", s));
+                src = s.source();
+            }
+            tracing::error!(session_id = sys_session_id, file = %dest_path, err = %e, chain = %chain, is_auto, "upload send error");
+            return Err(e.into());
+        }
+    };
     if !resp.status().is_success() {
         tracing::warn!(session_id = sys_session_id, file = %dest_path, status = ?resp.status(), is_auto, "upload failed status");
         anyhow::bail!("upload failed: {}", resp.status());
@@ -229,11 +243,15 @@ fn spawn_watcher(session_id: i32, user_id: i32, root: PathBuf, base_url: String,
     std::thread::spawn(move || {
         let client = {
             let mut builder = reqwest::blocking::Client::builder();
+            use std::time::Duration;
             if let Some(t) = token.clone() {
                 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
                 let mut headers = HeaderMap::new();
                 if let Ok(hval) = HeaderValue::from_str(&t) { headers.insert(AUTHORIZATION, hval); }
-                builder = builder.default_headers(headers);
+                builder = builder
+                    .default_headers(headers)
+                    .connect_timeout(Duration::from_secs(10))
+                    .tcp_keepalive(Duration::from_secs(30));
             }
             builder.build().unwrap()
         };
@@ -314,11 +332,15 @@ pub async fn start_sync(
          // Build a blocking client in this thread to avoid interacting with the Tokio runtime
          let client = {
              let mut builder = reqwest::blocking::Client::builder();
+             use std::time::Duration;
              if let Some(t) = token.clone() {
                 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
                  let mut headers = HeaderMap::new();
-                if let Ok(hval) = HeaderValue::from_str(&t) { headers.insert(AUTHORIZATION, hval); }
-                 builder = builder.default_headers(headers);
+                 if let Ok(hval) = HeaderValue::from_str(&t) { headers.insert(AUTHORIZATION, hval); }
+                 builder = builder
+                     .default_headers(headers)
+                     .connect_timeout(Duration::from_secs(10))
+                     .tcp_keepalive(Duration::from_secs(30));
              }
              // Safe to unwrap here; if it fails, record error below
              match builder.build() {
