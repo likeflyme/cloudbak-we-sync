@@ -117,10 +117,11 @@ fn fetch_remote_map_blocking(client: &reqwest::blocking::Client, base_url: &str,
 fn upload_one_blocking(client: &reqwest::blocking::Client, base_url: &str, sys_session_id: i32, root: &Path, file_path: &Path, is_auto: bool) -> Result<()> {
     let dest_path = normalize_rel(root, file_path);
     let url = format!("{}/sync/upload", base_url.trim_end_matches('/'));
-    let file_bytes = std::fs::read(file_path)?;
     let local_mtime_ms = std::fs::metadata(file_path).ok().map(|m| file_mtime_millis(&m)).unwrap_or(0);
-    tracing::trace!(session_id = sys_session_id, file = %dest_path, size = file_bytes.len(), mtime = local_mtime_ms, is_auto, "upload_one_blocking start");
-    let part = reqwest::blocking::multipart::Part::bytes(file_bytes).file_name(Path::new(&dest_path).file_name().and_then(|s| s.to_str()).unwrap_or("file").to_string());
+    let file_size = std::fs::metadata(file_path).map(|m| m.len()).unwrap_or(0);
+    tracing::trace!(session_id = sys_session_id, file = %dest_path, size = file_size, mtime = local_mtime_ms, is_auto, "upload_one_blocking start");
+    let file_name = Path::new(&dest_path).file_name().and_then(|s| s.to_str()).unwrap_or("file").to_string();
+    let part = reqwest::blocking::multipart::Part::file(file_path.to_owned())?.file_name(file_name);
     let mut form = reqwest::blocking::multipart::Form::new()
         .text("dest_path", dest_path.clone())
         .text("sys_session_id", sys_session_id.to_string())
