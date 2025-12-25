@@ -230,10 +230,9 @@ fn spawn_watcher(session_id: i32, user_id: i32, root: PathBuf, base_url: String,
         let client = {
             let mut builder = reqwest::blocking::Client::builder();
             if let Some(t) = token.clone() {
-                use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
+                use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
                 let mut headers = HeaderMap::new();
                 if let Ok(hval) = HeaderValue::from_str(&t) { headers.insert(AUTHORIZATION, hval); }
-                headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
                 builder = builder.default_headers(headers);
             }
             builder.build().unwrap()
@@ -316,10 +315,9 @@ pub async fn start_sync(
          let client = {
              let mut builder = reqwest::blocking::Client::builder();
              if let Some(t) = token.clone() {
-                 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
+                use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
                  let mut headers = HeaderMap::new();
-                 if let Ok(hval) = HeaderValue::from_str(&t) { headers.insert(AUTHORIZATION, hval); }
-                 headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+                if let Ok(hval) = HeaderValue::from_str(&t) { headers.insert(AUTHORIZATION, hval); }
                  builder = builder.default_headers(headers);
              }
              // Safe to unwrap here; if it fails, record error below
