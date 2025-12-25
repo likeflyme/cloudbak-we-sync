@@ -24,3 +24,4 @@ dist-ssr
 .vscode
 wechat-dump-rs-4
 chatlog
+target
