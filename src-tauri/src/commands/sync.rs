@@ -117,10 +117,13 @@ fn fetch_remote_map_blocking(client: &reqwest::blocking::Client, base_url: &str,
 fn upload_one_blocking(client: &reqwest::blocking::Client, base_url: &str, sys_session_id: i32, root: &Path, file_path: &Path, is_auto: bool) -> Result<()> {
     let dest_path = normalize_rel(root, file_path);
     let url = format!("{}/sync/upload", base_url.trim_end_matches('/'));
-    let file_bytes = std::fs::read(file_path)?;
     let local_mtime_ms = std::fs::metadata(file_path).ok().map(|m| file_mtime_millis(&m)).unwrap_or(0);
-    tracing::trace!(session_id = sys_session_id, file = %dest_path, size = file_bytes.len(), mtime = local_mtime_ms, is_auto, "upload_one_blocking start");
-    let part = reqwest::blocking::multipart::Part::bytes(file_bytes).file_name(Path::new(&dest_path).file_name().and_then(|s| s.to_str()).unwrap_or("file").to_string());
+    let file_size = std::fs::metadata(file_path).map(|m| m.len()).unwrap_or(0);
+    tracing::trace!(session_id = sys_session_id, file = %dest_path, size = file_size, mtime = local_mtime_ms, is_auto, "upload_one_blocking start");
+    let file_name = Path::new(&dest_path).file_name().and_then(|s| s.to_str()).unwrap_or("file").to_string();
+    let file_handle = std::fs::File::open(file_path)?;
+    let part = reqwest::blocking::multipart::Part::reader_with_length(file_handle, file_size)
+        .file_name(file_name);
     let mut form = reqwest::blocking::multipart::Form::new()
         .text("dest_path", dest_path.clone())
         .text("sys_session_id", sys_session_id.to_string())
@@ -128,7 +131,21 @@ fn upload_one_blocking(client: &reqwest::blocking::Client, base_url: &str, sys_s
         .text("client_mtime", local_mtime_ms.to_string())
         .part("file", part);
     if is_auto { form = form.text("is_auto", "true"); }
-    let resp = client.post(url).multipart(form).send()?;
+    let resp = match client.post(url).multipart(form).send() {
+        Ok(r) => r,
+        Err(e) => {
+            use std::error::Error as StdError;
+            let mut chain = String::new();
+            let mut src = e.source();
+            while let Some(s) = src {
+                chain.push_str(" -> ");
+                chain.push_str(&format!("{}", s));
+                src = s.source();
+            }
+            tracing::error!(session_id = sys_session_id, file = %dest_path, err = %e, chain = %chain, is_auto, "upload send error");
+            return Err(e.into());
+        }
+    };
     if !resp.status().is_success() {
         tracing::warn!(session_id = sys_session_id, file = %dest_path, status = ?resp.status(), is_auto, "upload failed status");
         anyhow::bail!("upload failed: {}", resp.status());
@@ -228,12 +245,17 @@ fn spawn_watcher(session_id: i32, user_id: i32, root: PathBuf, base_url: String,
     std::thread::spawn(move || {
         let client = {
             let mut builder = reqwest::blocking::Client::builder();
+            use std::time::Duration;
             if let Some(t) = token.clone() {
-                use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
+                use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
                 let mut headers = HeaderMap::new();
                 if let Ok(hval) = HeaderValue::from_str(&t) { headers.insert(AUTHORIZATION, hval); }
-                headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-                builder = builder.default_headers(headers);
+                builder = builder
+                    .default_headers(headers)
+                    .connect_timeout(Duration::from_secs(10))
+                    .tcp_keepalive(Duration::from_secs(30))
+                    // 设定较长的请求总超时，避免大文件上传过程中客户端超时
+                    .timeout(Duration::from_secs(1800));
             }
             builder.build().unwrap()
         };
@@ -314,12 +336,16 @@ pub async fn start_sync(
          // Build a blocking client in this thread to avoid interacting with the Tokio runtime
          let client = {
              let mut builder = reqwest::blocking::Client::builder();
+             use std::time::Duration;
              if let Some(t) = token.clone() {
-                 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
+                use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
                  let mut headers = HeaderMap::new();
                  if let Ok(hval) = HeaderValue::from_str(&t) { headers.insert(AUTHORIZATION, hval); }
-                 headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-                 builder = builder.default_headers(headers);
+                 builder = builder
+                     .default_headers(headers)
+                     .connect_timeout(Duration::from_secs(10))
+                     .tcp_keepalive(Duration::from_secs(30))
+                     .timeout(Duration::from_secs(1800));
              }
              // Safe to unwrap here; if it fails, record error below
              match builder.build() {
