@@ -87,8 +87,8 @@ pub fn run() {
                 })
                 .build(app);
 
-            let auto_flag = app.state::<LaunchState>().0.load(std::sync::atomic::Ordering::Relaxed);
-            if auto_flag { if let Some(w) = app.get_webview_window("main") { let _ = w.hide(); } }
+            // let auto_flag = app.state::<LaunchState>().0.load(std::sync::atomic::Ordering::Relaxed);
+            // if auto_flag { if let Some(w) = app.get_webview_window("main") { let _ = w.hide(); } }
             if let Ok(uid_str) = std::env::var("WE_SYNC_USER_ID") {
                 if let Ok(uid) = uid_str.parse::<i32>() {
                     let base_url = std::env::var("WE_SYNC_ENDPOINT").unwrap_or_default();
