@@ -121,7 +121,9 @@ fn upload_one_blocking(client: &reqwest::blocking::Client, base_url: &str, sys_s
     let file_size = std::fs::metadata(file_path).map(|m| m.len()).unwrap_or(0);
     tracing::trace!(session_id = sys_session_id, file = %dest_path, size = file_size, mtime = local_mtime_ms, is_auto, "upload_one_blocking start");
     let file_name = Path::new(&dest_path).file_name().and_then(|s| s.to_str()).unwrap_or("file").to_string();
-    let part = reqwest::blocking::multipart::Part::file(file_path.to_owned())?.file_name(file_name);
+    let file_handle = std::fs::File::open(file_path)?;
+    let part = reqwest::blocking::multipart::Part::stream_with_length(file_handle, file_size)
+        .file_name(file_name);
     let mut form = reqwest::blocking::multipart::Form::new()
         .text("dest_path", dest_path.clone())
         .text("sys_session_id", sys_session_id.to_string())
@@ -251,7 +253,9 @@ fn spawn_watcher(session_id: i32, user_id: i32, root: PathBuf, base_url: String,
                 builder = builder
                     .default_headers(headers)
                     .connect_timeout(Duration::from_secs(10))
-                    .tcp_keepalive(Duration::from_secs(30));
+                    .tcp_keepalive(Duration::from_secs(30))
+                    // 设定较长的请求总超时，避免大文件上传过程中客户端超时
+                    .timeout(Duration::from_secs(1800));
             }
             builder.build().unwrap()
         };
@@ -340,7 +344,8 @@ pub async fn start_sync(
                  builder = builder
                      .default_headers(headers)
                      .connect_timeout(Duration::from_secs(10))
-                     .tcp_keepalive(Duration::from_secs(30));
+                     .tcp_keepalive(Duration::from_secs(30))
+                     .timeout(Duration::from_secs(1800));
              }
              // Safe to unwrap here; if it fails, record error below
              match builder.build() {
