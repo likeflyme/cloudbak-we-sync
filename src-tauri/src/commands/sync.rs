@@ -48,7 +48,7 @@ static WATCHERS: Lazy<Mutex<HashMap<String, WatchHandle>>> = Lazy::new(|| Mutex:
 // 新增：跟踪已经启动的 session watcher，防止重复
 static ACTIVE_AUTO_SESSIONS: Lazy<Mutex<HashSet<i32>>> = Lazy::new(|| Mutex::new(HashSet::new()));
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 struct RemoteEntry {
     path: String,
     is_dir: bool,
@@ -110,6 +110,62 @@ fn fetch_remote_map_blocking(client: &reqwest::blocking::Client, base_url: &str,
     let mut map = HashMap::new();
     for it in items.into_iter() {
         map.insert(it.path.clone(), it);
+    }
+    Ok(map)
+}
+
+// 新增：仅获取指定目录（sub_path）的远程列表，recursive=false
+fn fetch_remote_dir_blocking(
+    client: &reqwest::blocking::Client,
+    base_url: &str,
+    sys_session_id: i32,
+    sub_path: &str,
+) -> Result<Vec<RemoteEntry>> {
+    let url = format!(
+        "{}/sync/list?sys_session_id={}&sub_path={}&recursive=false&include_hash=false",
+        base_url.trim_end_matches('/'),
+        sys_session_id,
+        sub_path
+    );
+    tracing::trace!(session_id = sys_session_id, sub_path, %url, "fetch_remote_dir_blocking start");
+    let resp = client.get(url).send()?;
+    if !resp.status().is_success() {
+        tracing::error!(session_id = sys_session_id, status = ?resp.status(), sub_path, "remote dir http error");
+        anyhow::bail!("remote dir failed: {}", resp.status());
+    }
+    let items: Vec<RemoteEntry> = resp.json()?;
+    tracing::trace!(session_id = sys_session_id, sub_path, count = items.len(), "remote dir fetched");
+    Ok(items)
+}
+
+// 新增：增量构建远程文件映射，每次只请求一个目录的数据
+fn build_remote_map_incremental(
+    client: &reqwest::blocking::Client,
+    base_url: &str,
+    sys_session_id: i32,
+) -> Result<HashMap<String, RemoteEntry>> {
+    let mut map: HashMap<String, RemoteEntry> = HashMap::new();
+    let mut stack: Vec<String> = vec![String::from("")]; // 根目录用空字符串表示
+    let mut visited: HashSet<String> = HashSet::new(); // 记录已列过的目录
+
+    while let Some(dir) = stack.pop() {
+        // 若已列过该目录，跳过
+        if !visited.insert(dir.clone()) {
+            continue;
+        }
+        let entries = fetch_remote_dir_blocking(client, base_url, sys_session_id, &dir)?;
+        for it in entries.into_iter() {
+            // 记录当前目录项（文件或子目录）
+            map.insert(it.path.clone(), it.clone());
+            // 将子目录入栈，但避免重复入栈（已经访问过的不会再次请求）
+            if it.is_dir {
+                if !visited.contains(&it.path) {
+                    stack.push(it.path.clone());
+                }
+            }
+        }
+        // 可选：轻微节流，降低服务端压力
+        // std::thread::sleep(std::time::Duration::from_millis(2));
     }
     Ok(map)
 }
@@ -366,7 +422,7 @@ pub async fn start_sync(
              status.message = Some("scanning".into());
          }
 
-         let remote_map = match fetch_remote_map_blocking(&client, &base_url, sys_session_id) {
+         let remote_map = match build_remote_map_incremental(&client, &base_url, sys_session_id) {
              Ok(m) => m,
              Err(e) => {
                 tracing::error!(error = %e, session_id = sys_session_id, "remote list error");
@@ -425,32 +481,78 @@ pub async fn start_sync(
          }
     tracing::info!(session_id = sys_session_id, to_upload = to_upload.len(), "upload phase start");
 
+         // 并发上传：使用固定大小的工作线程池
+         let concurrency: usize = std::env::var("WESYNC_UPLOAD_CONCURRENCY")
+             .ok()
+             .and_then(|v| v.parse().ok())
+             .filter(|&n| n > 0 && n <= 16)
+             .unwrap_or(4);
+         use std::sync::mpsc;
+         let (tx, rx) = mpsc::channel::<PathBuf>();
+         // 将 Receiver 包装为可在多线程共享的互斥体
+         let rx_shared = std::sync::Arc::new(std::sync::Mutex::new(rx));
+
+         // 为每个 worker 克隆必要数据
+         let mut workers = Vec::with_capacity(concurrency);
+         for i in 0..concurrency {
+             let rx_shared = rx_shared.clone();
+             let client = client.clone();
+             let base_url = base_url.clone();
+             let root = root.clone();
+             let task = task.clone();
+             workers.push(std::thread::spawn(move || {
+                 loop {
+                     // 从共享的 Receiver 取任务（阻塞等待）
+                     let file = {
+                         match rx_shared.lock().unwrap().recv() {
+                             Ok(f) => f,
+                             Err(_) => break, // 发送端关闭
+                         }
+                     };
+                     // 取消检查
+                     if task.cancel.load(Ordering::Relaxed) { break; }
+                     let rel = normalize_rel(&root, &file);
+                     {
+                         let mut s = task.status.lock();
+                         s.current = Some(rel.clone());
+                     }
+                     match upload_one_blocking(&client, &base_url, sys_session_id, &root, &file, false) {
+                         Ok(_) => {
+                             let mut s = task.status.lock();
+                             s.uploaded += 1;
+                             // 可选：轻微节流，防止服务端压力过大
+                             // std::thread::sleep(std::time::Duration::from_millis(2));
+                             tracing::debug!(session_id = sys_session_id, worker = i, file = %rel, "uploaded");
+                         }
+                         Err(e) => {
+                             let mut s = task.status.lock();
+                             s.failed += 1;
+                             s.message = Some(format!("upload failed: {}", e));
+                             tracing::warn!(session_id = sys_session_id, worker = i, file = %rel, error = %e, "upload failed");
+                         }
+                     }
+                 }
+                 tracing::trace!(session_id = sys_session_id, worker = i, "worker exit");
+             }));
+         }
+
+         // 派发任务到队列
          for file in to_upload {
              if task.cancel.load(Ordering::Relaxed) {
                  let mut s = task.status.lock();
                  s.state = "stopped".into();
                  s.message = Some("stopped by user".into());
-                tracing::info!(session_id = sys_session_id, "sync cancelled by user");
+                 tracing::info!(session_id = sys_session_id, "sync cancelled by user");
                  break;
              }
-             let rel = normalize_rel(&root, &file);
-             {
-                 let mut s = task.status.lock();
-                 s.current = Some(rel.clone());
-             }
-             match upload_one_blocking(&client, &base_url, sys_session_id, &root, &file, false) {
-                 Ok(_) => {
-                     let mut s = task.status.lock();
-                     s.uploaded += 1;
-                    tracing::debug!(session_id = sys_session_id, file = %rel, "uploaded");
-                 }
-                 Err(e) => {
-                     let mut s = task.status.lock();
-                     s.failed += 1;
-                     s.message = Some(format!("upload failed: {}", e));
-                    tracing::warn!(session_id = sys_session_id, file = %rel, error = %e, "upload failed");
-                 }
-             }
+             // 发送到队列（若接收端关闭则提前结束）
+             if tx.send(file).is_err() { break; }
+         }
+         // 关闭发送端，使所有 worker 正常退出
+         drop(tx);
+         // 等待所有 worker 结束
+         for h in workers {
+             let _ = h.join();
          }
 
          if !task.cancel.load(Ordering::Relaxed) {
@@ -464,7 +566,7 @@ pub async fn start_sync(
      });
 
      Ok(task_id)
-}
+ }
 
 #[tauri::command]
 pub async fn stop_sync(task_id: String) -> Result<(), String> {
