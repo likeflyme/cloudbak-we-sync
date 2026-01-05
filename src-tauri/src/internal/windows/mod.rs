@@ -3,3 +3,4 @@ pub mod memory;
 pub mod validator;
 pub mod dat2img;
 pub mod avatar;
+pub mod db_decrypt;

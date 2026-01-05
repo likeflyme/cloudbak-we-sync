@@ -10,6 +10,7 @@ type FtOptions = {
 export const ft = async (url: string, options: FtOptions = {}) => {
   const token = localStorage.getItem("token");
   const endpoint = localStorage.getItem("endpoint") || "";
+  console.log(`Fetching ${options.method || 'GET'} ${endpoint + url}`);
   const custHeaders: Record<string, string> = options.headers || {};
   const headers: Record<string, string> = {
     "Content-Type": "application/json",

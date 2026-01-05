@@ -210,6 +210,52 @@ fn upload_one_blocking(client: &reqwest::blocking::Client, base_url: &str, sys_s
     Ok(())
 }
 
+// 读取本地解析开关（来自 plugin-store 写入的 settings.json）
+fn get_local_parse_enabled() -> bool {
+    if let Ok(base) = crate::internal::app_paths::app_data_dir() {
+        let path = base.join("settings.json");
+        if let Ok(bytes) = std::fs::read(&path) {
+            if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+                return v.get("local_parse_enabled").and_then(|b| b.as_bool()).unwrap_or(false);
+            }
+        }
+    }
+    false
+}
+
+// 上传指定目标路径（用于上传解析后的 db）
+fn upload_with_dest_blocking(
+    client: &reqwest::blocking::Client,
+    base_url: &str,
+    sys_session_id: i32,
+    src_file_path: &Path,
+    dest_path: &str,
+    is_auto: bool,
+) -> Result<()> {
+    let url = format!("{}/sync/upload", base_url.trim_end_matches('/'));
+    let local_mtime_ms = std::fs::metadata(src_file_path).ok().map(|m| file_mtime_millis(&m)).unwrap_or(0);
+    let file_size = std::fs::metadata(src_file_path).map(|m| m.len()).unwrap_or(0);
+    tracing::trace!(session_id = sys_session_id, file = %dest_path, size = file_size, mtime = local_mtime_ms, is_auto, "upload_with_dest_blocking start");
+    let file_name = Path::new(dest_path).file_name().and_then(|s| s.to_str()).unwrap_or("file").to_string();
+    let file_handle = std::fs::File::open(src_file_path)?;
+    let part = reqwest::blocking::multipart::Part::reader_with_length(file_handle, file_size)
+        .file_name(file_name);
+    let mut form = reqwest::blocking::multipart::Form::new()
+        .text("dest_path", dest_path.to_string())
+        .text("sys_session_id", sys_session_id.to_string())
+        .text("overwrite", "true")
+        .text("client_mtime", local_mtime_ms.to_string())
+        .part("file", part);
+    if is_auto { form = form.text("is_auto", "true"); }
+    let resp = client.post(url).multipart(form).send()?;
+    if !resp.status().is_success() {
+        tracing::warn!(session_id = sys_session_id, file = %dest_path, status = ?resp.status(), is_auto, "upload failed status");
+        anyhow::bail!("upload failed: {}", resp.status());
+    }
+    tracing::trace!(session_id = sys_session_id, file = %dest_path, is_auto, "upload success");
+    Ok(())
+}
+
 fn load_session_config(session_id: i32, user_id: i32) -> Option<SessionConfig> {
     let base = crate::internal::app_paths::app_data_dir().ok()?;
     let path = base.join("users").join(user_id.to_string()).join("sessions").join(format!("{}.json", session_id));
@@ -378,13 +424,23 @@ pub async fn start_sync(
      }
      let task_id = sys_session_id.to_string();
 
+     tracing::info!("task sync initialized");
+
+     let a = 1;
+
+
+
      // cancel existing task if any
      if let Some(old) = TASKS.lock().remove(&task_id) { old.cancel.store(true, Ordering::Relaxed); }
-    tracing::debug!(session_id = sys_session_id, "previous task (if any) cancelled");
+    tracing::info!(session_id = sys_session_id, "previous task (if any) cancelled");
 
      let task = Task::new();
      TASKS.lock().insert(task_id.clone(), task.clone());
-    tracing::debug!(task_id = %task_id, "sync task created");
+    tracing::info!(task_id = %task_id, "sync task created");
+
+    if a == 1 {
+        return Err("Debug exit".into());
+     }
 
      // Move heavy/blocking network work entirely into a dedicated OS thread
      std::thread::spawn(move || {
@@ -437,7 +493,7 @@ pub async fn start_sync(
          // load filters if any (exclusion rules)
          let cfg = load_session_config(sys_session_id, user_id);
          let filter_str = cfg.and_then(|c| c.sync_filters).unwrap_or_default();
-    tracing::debug!(session_id = sys_session_id, filters_len = filter_str.len(), "begin scanning files");
+    tracing::info!(session_id = sys_session_id, filters_len = filter_str.len(), "begin scanning files");
          for entry in WalkDir::new(&root).into_iter().filter_map(|e| e.ok()) {
              if task.cancel.load(Ordering::Relaxed) { break; }
              let path = entry.path();
@@ -481,6 +537,12 @@ pub async fn start_sync(
          }
     tracing::info!(session_id = sys_session_id, to_upload = to_upload.len(), "upload phase start");
 
+         // 读取“本地解析”开关
+         let local_parse_enabled = get_local_parse_enabled();
+         // 尝试从会话配置读取 db 解密密钥（若存在）
+         let session_cfg = load_session_config(sys_session_id, user_id);
+         let db_key_hex = session_cfg.as_ref().and_then(|c| c.session_info.as_ref()).and_then(|info| info.get("db_key").and_then(|v| v.as_str())).map(|s| s.to_string());
+
          // 并发上传：使用固定大小的工作线程池
          let concurrency: usize = std::env::var("WESYNC_UPLOAD_CONCURRENCY")
              .ok()
@@ -500,6 +562,8 @@ pub async fn start_sync(
              let base_url = base_url.clone();
              let root = root.clone();
              let task = task.clone();
+             let local_parse_enabled = local_parse_enabled;
+             let db_key_hex = db_key_hex.clone();
              workers.push(std::thread::spawn(move || {
                  loop {
                      // 从共享的 Receiver 取任务（阻塞等待）
@@ -516,19 +580,80 @@ pub async fn start_sync(
                          let mut s = task.status.lock();
                          s.current = Some(rel.clone());
                      }
+
+                     // 若需要本地解析且为 .db 文件，尝试解密到缓存并上传解析后的文件
+                     let mut decoded_uploaded = false;
+                     if local_parse_enabled && file.extension().and_then(|e| e.to_str()) == Some("db") {
+                         if let Some(db_key_hex) = db_key_hex.as_ref() {
+                             if !db_key_hex.is_empty() {
+                                 if let Ok(base) = crate::internal::app_paths::app_data_dir() {
+                                     let cache_dir = base.join("cache").join("decoded").join(sys_session_id.to_string());
+                                     let _ = std::fs::create_dir_all(&cache_dir);
+                                     let orig_name = file.file_name().and_then(|s| s.to_str()).unwrap_or("file.db");
+                                     let decoded_name = format!("decoded_{}", orig_name);
+                                     let decoded_path = cache_dir.join(&decoded_name);
+                                     tracing::info!(session_id = sys_session_id, file = %rel, decoded_file = %decoded_path.display(), "attempting db decrypt and upload");
+                                     // 调用解密
+                                     if let Err(e) = crate::internal::windows::db_decrypt::decrypt_db_file_v4(&file, db_key_hex, &decoded_path) {
+                                         // 解析失败：打印失败日志与异常链
+                                         use std::error::Error as StdError;
+                                         let mut chain = String::new();
+                                         let mut src = e.source();
+                                         while let Some(s) = src {
+                                             chain.push_str(" -> ");
+                                             chain.push_str(&format!("{}", s));
+                                             src = s.source();
+                                         }
+                                         tracing::error!(
+                                             session_id = sys_session_id,
+                                             file = %rel,
+                                             err = %e,
+                                             chain = %chain,
+                                             saved_target = %decoded_path.display(),
+                                             "db decrypt exception"
+                                         );
+                                         tracing::warn!(session_id = sys_session_id, file = %rel, "db decrypt failed, skip decoded upload");
+                                     } else {
+                                         // 解析成功后打印完整保存路径
+                                         tracing::info!(session_id = sys_session_id, file = %rel, saved_decoded = %decoded_path.display(), "db decrypted and saved");
+                                         // 解析后的上传目标路径：与原文件同目录，文件名前加 decoded_
+                                         let parent_rel = Path::new(&rel).parent().map(|p| p.to_string_lossy().to_string()).unwrap_or_else(|| "".to_string());
+                                         let dest_decoded = if parent_rel.is_empty() { decoded_name.clone() } else { format!("{}/{}", parent_rel, decoded_name) };
+                                         tracing::info!(session_id = sys_session_id, dest = %dest_decoded, src = %decoded_path.display(), "uploading decoded db");
+                                         match upload_with_dest_blocking(&client, &base_url, sys_session_id, &decoded_path, &dest_decoded, false) {
+                                             Ok(_) => {
+                                                 decoded_uploaded = true;
+                                                 let mut s = task.status.lock();
+                                                 s.uploaded += 1;
+                                                 tracing::debug!(session_id = sys_session_id, worker = i, file = %dest_decoded, "uploaded decoded db");
+                                             }
+                                             Err(e) => {
+                                                 let mut s = task.status.lock();
+                                                 s.failed += 1;
+                                                 s.message = Some(format!("upload decoded failed: {}", e));
+                                                 tracing::warn!(session_id = sys_session_id, worker = i, file = %dest_decoded, error = %e, "upload decoded failed");
+                                             }
+                                         }
+                                     }
+                                 }
+                             }
+                         }
+                     }
+
+                     // 始终上传原始文件
                      match upload_one_blocking(&client, &base_url, sys_session_id, &root, &file, false) {
                          Ok(_) => {
                              let mut s = task.status.lock();
                              s.uploaded += 1;
                              // 可选：轻微节流，防止服务端压力过大
                              // std::thread::sleep(std::time::Duration::from_millis(2));
-                             tracing::debug!(session_id = sys_session_id, worker = i, file = %rel, "uploaded");
+                             tracing::debug!(session_id = sys_session_id, worker = i, file = %rel, decoded_uploaded, "uploaded original");
                          }
                          Err(e) => {
                              let mut s = task.status.lock();
                              s.failed += 1;
                              s.message = Some(format!("upload failed: {}", e));
-                             tracing::warn!(session_id = sys_session_id, worker = i, file = %rel, error = %e, "upload failed");
+                             tracing::warn!(session_id = sys_session_id, worker = i, file = %rel, error = %e, "upload original failed");
                          }
                      }
                  }

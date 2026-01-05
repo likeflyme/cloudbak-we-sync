@@ -21,6 +21,8 @@
         "http://*:*/*",
         "http://localhost:8000/*"
       ]
-    }
+    },
+    "store:allow-load",
+    "store:default"
   ]
 }

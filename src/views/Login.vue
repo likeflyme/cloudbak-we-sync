@@ -161,7 +161,9 @@ const login = async () => {
             if (r.status === 200) {
               r.json().then(info => {
                 if (info && (info.id !== undefined)) {
+                  // 持久化到后端 store 与本地 user_id，便于会话扫描等特性
                   try { invoke('persist_auth', { userId: Number(info.id), token, baseUrl: payload.endpoint + '/api' }) } catch {}
+                  try { localStorage.setItem('user_id', String(Number(info.id))) } catch {}
                 }
                 router.push('/');
               });

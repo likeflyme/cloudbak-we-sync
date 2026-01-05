@@ -30,9 +30,11 @@ pub async fn set_auth_context(state: tauri::State<'_, AuthState>, user_id: i32, 
 }
 
 #[tauri::command]
-pub async fn clear_auth_context(state: tauri::State<'_, AuthState>) -> Result<(), String> {
+pub async fn clear_auth_context(state: tauri::State<'_, AuthState>, app: tauri::AppHandle) -> Result<(), String> {
+    // 同步清理持久化数据，避免下次启动残留旧地址/用户
+    clear_auth_persisted(&app);
     let existed = state.0.lock().take().is_some();
-    tracing::info!(cleared = existed, "auth context cleared");
+    tracing::info!(cleared = existed, store = STORE_NAME, "auth context cleared");
     Ok(())
 }
 
@@ -117,8 +119,8 @@ pub async fn load_persisted_auth(state: tauri::State<'_, AuthState>, app: tauri:
     Ok(Some(info))
 }
 
-#[tauri::command]
-pub async fn clear_persisted_auth(state: tauri::State<'_, AuthState>, app: tauri::AppHandle) -> Result<(), String> {
+// 内部工具：清理持久化的鉴权数据（store 与备份文件）
+fn clear_auth_persisted(app: &tauri::AppHandle) {
     // 清除 store
     if let Ok(store) = app.store(STORE_NAME) {
         store.clear();
@@ -129,6 +131,11 @@ pub async fn clear_persisted_auth(state: tauri::State<'_, AuthState>, app: tauri
         let path = dir.join(AUTH_FILE);
         let _ = fs::remove_file(&path);
     }
+}
+
+#[tauri::command]
+pub async fn clear_persisted_auth(state: tauri::State<'_, AuthState>, app: tauri::AppHandle) -> Result<(), String> {
+    clear_auth_persisted(&app);
     state.0.lock().take();
     tracing::info!(store = STORE_NAME, "auth cleared");
     Ok(())
