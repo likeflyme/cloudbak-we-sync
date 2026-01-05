@@ -426,10 +426,6 @@ pub async fn start_sync(
 
      tracing::info!("task sync initialized");
 
-     let a = 1;
-
-
-
      // cancel existing task if any
      if let Some(old) = TASKS.lock().remove(&task_id) { old.cancel.store(true, Ordering::Relaxed); }
     tracing::info!(session_id = sys_session_id, "previous task (if any) cancelled");
@@ -437,10 +433,6 @@ pub async fn start_sync(
      let task = Task::new();
      TASKS.lock().insert(task_id.clone(), task.clone());
     tracing::info!(task_id = %task_id, "sync task created");
-
-    if a == 1 {
-        return Err("Debug exit".into());
-     }
 
      // Move heavy/blocking network work entirely into a dedicated OS thread
      std::thread::spawn(move || {
