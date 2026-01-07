@@ -4,6 +4,7 @@ import Login from '../views/Login.vue'
 import SessionDetailPage from '@/views/session/SessionDetailPage.vue'
 import EmptyState from '@/components/SessionDetail/EmptyState.vue'
 import { isLogin } from '@/common/login'
+import { getTokenFromStore } from '@/common/store'
 
 const routes: Array<RouteRecordRaw> = [
   {
@@ -38,6 +39,12 @@ const routes: Array<RouteRecordRaw> = [
         name: 'UpdateDetail',
         component: () => import('@/views/UpdateDetail.vue'),
         meta: { loginRequire: true }
+      },
+      {
+        path: 'info',
+        name: 'SysInfo',
+        component: () => import('@/views/SysInfo.vue'),
+        meta: { loginRequire: true }
       }
     ]
   },
@@ -59,11 +66,13 @@ const router = createRouter({
 
 router.beforeEach((to, _from, next) => {
   // 需要登录且未登录，则重定向到 login 页
-  if (to.matched.some(record => record.meta.loginRequire) && !isLogin()) {
-    next({ path: '/login' })
-  } else {
-    next()
-  }
+  getTokenFromStore().then(token => {
+    if (to.matched.some(record => record.meta.loginRequire) && !token) {
+      next({ path: '/login' })
+    } else {
+      next()
+    }
+  });
 })
 
 export default router

@@ -4,7 +4,9 @@ use anyhow::Result;
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
+use tauri::AppHandle;
 use walkdir::WalkDir;
+use crate::common::store_utils::{get_user_id, get_token, get_endpoint};
 
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct SyncStatus {
@@ -785,37 +787,45 @@ pub async fn get_auto_sync_state(session_id: i32, user_id: i32) -> Result<bool, 
 }
 
 #[tauri::command]
-pub async fn init_user_auto_sync(user_id: i32, base_url: String, token: Option<String>) -> Result<u32, String> {
-     use std::fs;
-     let base = crate::internal::app_paths::app_data_dir().map_err(|e| e.to_string())?;
-     let sess_dir = base.join("users").join(user_id.to_string()).join("sessions");
-     if !sess_dir.exists() { return Ok(0); }
-     let mut started: u32 = 0;
+pub async fn init_user_auto_sync(app: AppHandle) -> Result<u32, String> {
+    let user_id = crate::common::store_utils::get_user_id(&app);
+    let endpoint = crate::common::store_utils::get_endpoint(&app);
+    let token = crate::common::store_utils::get_token(&app);
+    if user_id.is_none() || endpoint.is_none() || token.is_none() {
+        tracing::info!("init_user_auto_sync skipped: missing user_id/endpoint/token");
+        return Ok(0);
+    }
+    let base_url = endpoint.unwrap(); // 修复 base_url 未定义
+    use std::fs;
+    let base = crate::internal::app_paths::app_data_dir().map_err(|e| e.to_string())?;
+    let sess_dir = base.join("users").join(user_id.unwrap().to_string()).join("sessions");
+    if !sess_dir.exists() { return Ok(0); }
+    let mut started: u32 = 0;
     tracing::info!(user_id, path = %sess_dir.display(), "init_user_auto_sync scanning");
-     for entry in fs::read_dir(&sess_dir).map_err(|e| e.to_string())? {
-         let entry = match entry { Ok(e) => e, Err(_) => continue };
-         let path = entry.path();
-         if !path.is_file() { continue; }
-         if path.extension().and_then(|s| s.to_str()) != Some("json") { continue; }
-         let file_stem = match path.file_stem().and_then(|s| s.to_str()) { Some(s) => s, None => continue };
-         let session_id: i32 = match file_stem.parse() { Ok(v) => v, Err(_) => continue };
-         let cfg = match load_session_config(session_id, user_id) { Some(c) => c, None => continue };
-         if !cfg.auto_sync.unwrap_or(false) { continue; }
-         // 已有 watcher 则跳过
-         {
-             let active = ACTIVE_AUTO_SESSIONS.lock();
-             if active.contains(&session_id) {
-                 tracing::info!(session_id, user_id, "watcher already active, skip in init");
-                 continue;
-             }
-         }
-         if let Some(info) = cfg.session_info.as_ref() {
-             if let Some(wx_dir_val) = info.get("wx_dir").and_then(|v| v.as_str()) {
-                 if !wx_dir_val.is_empty() && Path::new(wx_dir_val).exists() {
-                     let cancel = Arc::new(AtomicBool::new(false));
-                     let handle = WatchHandle { cancel: cancel.clone() };
-                     WATCHERS.lock().insert(session_id.to_string(), handle);
-                     if let Err(e) = spawn_watcher(session_id, user_id, PathBuf::from(wx_dir_val), base_url.clone(), token.clone(), cancel) {
+    for entry in fs::read_dir(&sess_dir).map_err(|e| e.to_string())? {
+        let entry = match entry { Ok(e) => e, Err(_) => continue };
+        let path = entry.path();
+        if !path.is_file() { continue; }
+        if path.extension().and_then(|s| s.to_str()) != Some("json") { continue; }
+        let file_stem = match path.file_stem().and_then(|s| s.to_str()) { Some(s) => s, None => continue };
+        let session_id: i32 = match file_stem.parse() { Ok(v) => v, Err(_) => continue };
+        let cfg = match load_session_config(session_id, user_id.unwrap()) { Some(c) => c, None => continue };
+        if !cfg.auto_sync.unwrap_or(false) { continue; }
+        // 已有 watcher 则跳过
+        {
+            let active = ACTIVE_AUTO_SESSIONS.lock();
+            if active.contains(&session_id) {
+                tracing::info!(session_id, user_id, "watcher already active, skip in init");
+                continue;
+            }
+        }
+        if let Some(info) = cfg.session_info.as_ref() {
+            if let Some(wx_dir_val) = info.get("wx_dir").and_then(|v| v.as_str()) {
+                if !wx_dir_val.is_empty() && Path::new(wx_dir_val).exists() {
+                    let cancel = Arc::new(AtomicBool::new(false));
+                    let handle = WatchHandle { cancel: cancel.clone() };
+                    WATCHERS.lock().insert(session_id.to_string(), handle);
+                    if let Err(e) = spawn_watcher(session_id, user_id.unwrap(), PathBuf::from(wx_dir_val), base_url.clone(), token.clone(), cancel) {
                         tracing::error!(session_id, error = %e, "auto sync watcher start failed");
                      } else {
                         let mut active = ACTIVE_AUTO_SESSIONS.lock();
@@ -823,10 +833,10 @@ pub async fn init_user_auto_sync(user_id: i32, base_url: String, token: Option<S
                         tracing::info!(session_id, "auto sync watcher started");
                         started += 1;
                      }
-                 }
-             }
-         }
-     }
+                }
+            }
+        }
+    }
     tracing::info!(user_id, started, "init_user_auto_sync done");
-     Ok(started)
+    Ok(started)
 }

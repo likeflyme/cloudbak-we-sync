@@ -28,10 +28,10 @@
 <script setup lang="ts">
 import { NLayoutSider } from 'naive-ui';
 import { ref, onMounted, watch } from 'vue';
-import { endpoint } from '@/common/login';
+import { getEndpointFromStore } from '@/common/store';
 import type { Session } from '@/models/session';
 
-const host = endpoint();
+const host = ref<string>('');
 
 const props = defineProps<{
   sessions: Session[];
@@ -45,14 +45,16 @@ defineEmits<{
 // Map of avatar srcs keyed by session id
 const resolvedAvatars = ref<Record<number, string>>({});
 
-const buildAvatarUrl = (s: Session) => `${host}/api/resources/relative-resource?relative_path=${s.wx_id}/head_image/${s.wx_id}.jpg&session_id=${s.id}`;
+const buildAvatarUrl = (s: Session) => `${host.value}/api/resources/relative-resource?relative_path=${s.wx_id}/head_image/${s.wx_id}.jpg&session_id=${s.id}`;
 const getDefaultAvatar = (name?: string) => `https://ui-avatars.com/api/?name=${encodeURIComponent(name || 'U')}&background=random&size=128`;
 
 const onAvatarError = (s: Session) => {
   resolvedAvatars.value[s.id] = getDefaultAvatar(s.name);
 };
 
-onMounted(() => {
+onMounted(async () => {
+  const ep = await getEndpointFromStore();
+  host.value = ep || localStorage.getItem('endpoint') || '';
   props.sessions.forEach((s) => {
     resolvedAvatars.value[s.id] = buildAvatarUrl(s);
   });

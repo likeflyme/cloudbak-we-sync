@@ -69,7 +69,6 @@
     <!-- 关于我们弹窗 -->
     <n-modal v-model:show="showAboutDialog" preset="card" title="关于我们" style="max-width:420px;">
       <div style="font-size:14px; line-height:1.6;">
-        <p><strong>客户端版本号：</strong>{{ clientVersion }}</p>
         <p><strong>官方网站：</strong><a href="https://www.cloudbak.org" target="_blank">https://www.cloudbak.org</a></p>
         <p><strong>社区论坛：</strong><a href="https://forum.cloudbak.org.cn" target="_blank">https://forum.cloudbak.org.cn</a></p>
       </div>
@@ -84,6 +83,8 @@ import { invoke } from '@tauri-apps/api/core'
 import { removeToken } from '@/common/login'
 import { useRouter } from 'vue-router'
 import { getSessions, addSession } from '@/api/user'
+import { getSysInfo } from '@/api/sys'
+import { setSysInfoToStore, clearStoreExceptEndpoint, getUserInfoFromStore } from '@/common/store'
 import { token as getToken, endpoint } from '@/common/login'
 import { getVersion } from '@tauri-apps/api/app'
 // 临时类型声明避免 TS 报错（若 @tauri-apps/plugin-updater 未提供类型）
@@ -112,6 +113,7 @@ const showAboutDialog = ref(false)
 const appVersion = ref<string>('未知')
 
 const menuOptions = [
+  { label: '系统信息', key: 'sysInfo' },
   { label: '系统设置', key: 'settings' },
   { label: '检查更新', key: 'update' },
   { label: '关于我们', key: 'about' },
@@ -129,14 +131,20 @@ onMounted(async () => {
     if (isLoadingSessions.value) { pendingTrayRefresh = true; return }
     loadSessions()
   })
+  // 拉取系统信息并持久化到 store
+  try {
+    await loadSysInfo()
+  } catch {}
 })
 
 // 计算客户端版本号（关于我们用软件版本号）
 const clientVersion = computed(() => appVersion.value)
 
-const onMenuSelect = (key: string) => {
+const onMenuSelect = async (key: string) => {
   if (key === 'settings') {
     router.push({ name: 'Settings' })
+  } else if (key === 'sysInfo') {
+    router.push({ name: 'SysInfo' })
   } else if (key === 'update') {
     router.push({ name: 'UpdateDetail' })
   } else if (key === 'about') {
@@ -146,6 +154,8 @@ const onMenuSelect = (key: string) => {
     if (!ok) return
     removeToken()
     try { invoke('clear_auth_context') } catch {}
+    // 清空 store 中除 endpoint 外的所有数据
+    try { await clearStoreExceptEndpoint() } catch {}
     router.push('/login')
   }
 }
@@ -277,12 +287,12 @@ const loadSessions = () => {
     sessions.value = uniq
     // initialize auto sync watchers for sessions marked auto_sync
     try {
-      const userId = Number(localStorage.getItem('user_id') || '0')
-      if (userId > 0) {
-        const baseUrl = endpoint() + '/api'
-        const t = getToken() || undefined
-        invoke('init_user_auto_sync', { userId, baseUrl, token: t }).catch(() => {})
-      }
+      getUserInfoFromStore().then(async (info) => {
+        const baseUrl = endpoint() + '/api';
+        const t = getToken() || undefined;
+        const userId = info.id;
+        invoke('init_user_auto_sync').catch(() => {})
+      })
     } catch {}
   }).finally(() => {
     isLoadingSessions.value = false
@@ -303,6 +313,15 @@ const goUpdate = () => {
 }
 const dismissUpdateToast = () => {
   showUpdateToast.value = false
+}
+
+const loadSysInfo = async () => {
+  try {
+    const info = await getSysInfo()
+    await setSysInfoToStore(info)
+  } catch (e) {
+    console.warn('获取系统信息失败:', e)
+  }
 }
 
 onMounted(async () => {
@@ -336,6 +355,7 @@ const removeSessionById = (id: number) => {
 provide('removeSessionById', removeSessionById)
 
 loadSessions()
+
 </script>
 
 <style scoped>

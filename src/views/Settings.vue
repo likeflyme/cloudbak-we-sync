@@ -79,6 +79,7 @@ const loadStatus = async () => {
   } catch (e) {
     console.warn('load local parse from store failed', e)
   }
+  appDataPath.value = await appDataDir()
 }
 
 const onToggleAutoLaunch = async (val: boolean) => {

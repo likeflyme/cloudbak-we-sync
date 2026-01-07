@@ -1,6 +1,7 @@
 mod internal;
 use tauri_plugin_http;
 mod commands;
+mod common;
 use commands::auth::{AuthState};
 
 use std::sync::atomic::AtomicBool;
@@ -94,8 +95,9 @@ pub fn run() {
                     let base_url = std::env::var("WE_SYNC_ENDPOINT").unwrap_or_default();
                     let token = std::env::var("WE_SYNC_TOKEN").ok();
                     if !base_url.is_empty() {
+                        let app_handle = app.handle().clone();
                         tauri::async_runtime::spawn(async move {
-                            let _ = crate::commands::sync::init_user_auto_sync(uid, base_url + "/api", token).await;
+                            let _ = crate::commands::sync::init_user_auto_sync(app_handle).await;
                         });
                     }
                 }
@@ -104,10 +106,11 @@ pub fn run() {
             if let Ok(Some(info)) = tauri::async_runtime::block_on(commands::auth::load_persisted_auth(app.state::<commands::auth::AuthState>(), app.handle().clone())) {
                 let uid = info.user_id;
                 let base_url = info.base_url.clone();
-                let token = None; // token 在状态中
+                let token: Option<String> = None; // token 在状态中
                 if !base_url.is_empty() {
+                    let app_handle = app.handle().clone();
                     tauri::async_runtime::spawn(async move {
-                        let _ = crate::commands::sync::init_user_auto_sync(uid, base_url, token).await;
+                        let _ = crate::commands::sync::init_user_auto_sync(app_handle).await;
                     });
                 }
             }

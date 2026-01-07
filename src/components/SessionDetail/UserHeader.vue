@@ -20,23 +20,28 @@
 </template>
 
 <script setup lang="ts">
-import { ref, watch } from 'vue';
-import { endpoint } from '@/common/login';
+import { ref, watch, onMounted } from 'vue';
+import { getEndpointFromStore } from '@/common/store';
 import type { Session } from '@/models/session';
 import { NTag } from 'naive-ui';
 
 const props = defineProps<{ session: Session }>();
 
-const host = endpoint();
+const host = ref<string>('');
 const avatarSrc = ref<string>('');
 
-const buildAvatarUrl = () => `${host}/api/resources/relative-resource?relative_path=${props.session.wx_id}/head_image/${props.session.wx_id}.jpg&session_id=${props.session.id}`
+const buildAvatarUrl = () => `${host.value}/api/resources/relative-resource?relative_path=${props.session.wx_id}/head_image/${props.session.wx_id}.jpg&session_id=${props.session.id}`
 
 watch(
-  () => [props.session.wx_id, props.session.id],
+  [() => props.session.wx_id, () => props.session.id, host],
   () => { avatarSrc.value = buildAvatarUrl(); },
   { immediate: true }
 );
+
+onMounted(async () => {
+  const ep = await getEndpointFromStore();
+  host.value = ep || localStorage.getItem('endpoint') || '';
+});
 
 const session = props.session;
 

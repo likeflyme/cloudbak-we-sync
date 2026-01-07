@@ -1,5 +1,6 @@
 import { fetch } from "@tauri-apps/plugin-http";
 import router from "../router"; // 新增: 用于在403时跳转登录页
+import { getTokenFromStore, getEndpointFromStore } from '@/common/store'
 
 type FtOptions = {
   method?: string;
@@ -8,8 +9,11 @@ type FtOptions = {
 };
 
 export const ft = async (url: string, options: FtOptions = {}) => {
-  const token = localStorage.getItem("token");
-  const endpoint = localStorage.getItem("endpoint") || "";
+  // 优先从 store 获取，其次回退 localStorage
+  const storeToken = await getTokenFromStore();
+  const token = storeToken ?? localStorage.getItem("token") ?? undefined;
+  const storeEndpoint = await getEndpointFromStore();
+  const endpoint = (storeEndpoint ?? localStorage.getItem("endpoint")) || "";
   console.log(`Fetching ${options.method || 'GET'} ${endpoint + url}`);
   const custHeaders: Record<string, string> = options.headers || {};
   const headers: Record<string, string> = {
@@ -23,7 +27,6 @@ export const ft = async (url: string, options: FtOptions = {}) => {
   if (response.status === 403) {
     console.warn("403 Forbidden: logging out");
     localStorage.removeItem("token");
-    // 如有其它用户相关缓存可在此一并清理
     router.replace("/login");
     throw new Error("Forbidden");
   }

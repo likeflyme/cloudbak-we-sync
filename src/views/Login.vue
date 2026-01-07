@@ -74,6 +74,7 @@ import { NCard, NForm, NFormItem, NInput, NButton, NAlert } from 'naive-ui'
 import { login as userLogin, me as fetchMe } from '@/api/auth'
 import { invoke } from '@tauri-apps/api/core'
 import { saveToken } from '@/common/login'
+import { setTokenToStore, setEndpointToStore, setUserInfoToStore, getEndpointFromStore } from '@/common/store'
 
 const router = useRouter()
 
@@ -96,8 +97,8 @@ const form = reactive<LoginForm>({
 })
 
 // Prefill endpoint from localStorage when visiting the page
-onMounted(() => {
-  const savedEndpoint = localStorage.getItem('endpoint')
+onMounted(async () => {
+  const savedEndpoint = await getEndpointFromStore();
   if (savedEndpoint) {
     form.endpoint = savedEndpoint
   }
@@ -154,20 +155,24 @@ const login = async () => {
       if (resp.status === 200) {
         resp.json().then(d => {
           let token = d.token_type + " " + d.access_token;
-          saveToken(token);
-          localStorage.setItem('endpoint', payload.endpoint); // 保留 endpoint 也可改 store
+          // 通过 store 模块统一保存 token 与 endpoint
+          setTokenToStore(token).catch(() => {})
+          setEndpointToStore(payload.endpoint).catch(() => {})
+          console.log('登录成功，已保存 token 与 endpoint 到 store');
           // fetch current user info
           fetchMe(payload.endpoint, token).then(r => {
             if (r.status === 200) {
               r.json().then(info => {
                 if (info && (info.id !== undefined)) {
-                  // 持久化到后端 store 与本地 user_id，便于会话扫描等特性
-                  try { invoke('persist_auth', { userId: Number(info.id), token, baseUrl: payload.endpoint + '/api' }) } catch {}
-                  try { localStorage.setItem('user_id', String(Number(info.id))) } catch {}
+                 // 保存用户信息到 store
+                  setUserInfoToStore(info).catch(() => {})
                 }
+                console.log('已保存用户信息到 store');
+                console.log('跳转首页');
                 router.push('/');
               });
             } else {
+              console.log('获取用户信息失败，跳转首页');
               router.push('/');
             }
           }).catch(() => router.push('/'));

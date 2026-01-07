@@ -218,11 +218,13 @@ const toggleAutoSync = async () => {
   if (!session.value) return
   const s = session.value
   const enabling = !s.autoSync
-  const baseUrl = endpoint() + '/api'
-  const t = getToken() || undefined
+  const baseUrl = await endpoint() + '/api'
+  const t = await getToken() || undefined
   if (enabling) {
     try {
-      await invoke('start_auto_sync', { sysSessionId: s.id, userId, wxDir: s.wx_dir, baseUrl, token: t })
+      const data = { sysSessionId: s.id, userId, wxDir: s.wx_dir, baseUrl, token: t }
+      console.log(data)
+      await invoke('start_auto_sync', data)
       s.autoSync = true
       message.success('已开启自动同步')
     } catch (e: any) {
