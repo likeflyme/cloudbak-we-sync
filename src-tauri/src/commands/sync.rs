@@ -6,7 +6,16 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use tauri::AppHandle;
 use walkdir::WalkDir;
-use crate::common::store_utils::{get_user_id, get_token, get_endpoint};
+
+// --- Auto Sync global auth cache (per session) ---
+#[derive(Clone, Debug)]
+struct AutoUploadAuth {
+    base_url: String,
+    token: Option<String>,
+}
+
+// session_id -> auth
+static AUTO_UPLOAD_AUTH: Lazy<Mutex<HashMap<i32, AutoUploadAuth>>> = Lazy::new(|| Mutex::new(HashMap::new()));
 
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct SyncStatus {
@@ -99,7 +108,9 @@ fn same_mtime(local_ms: i64, remote_ms_opt: Option<i64>) -> bool {
     }
 }
 
-fn fetch_remote_map_blocking(client: &reqwest::blocking::Client, base_url: &str, sys_session_id: i32) -> Result<HashMap<String, RemoteEntry>> {
+#[allow(dead_code)]
+fn _fetch_remote_map_blocking(client: &reqwest::blocking::Client, base_url: &str, sys_session_id: i32) -> Result<HashMap<String, RemoteEntry>> {
+    #[allow(dead_code)]
     let url = format!("{}/sync/list?sys_session_id={}&sub_path=&recursive=true&include_hash=false", base_url.trim_end_matches('/'), sys_session_id);
     tracing::debug!(session_id = sys_session_id, %url, "fetch_remote_map_blocking start");
     let resp = client.get(url).send()?;
@@ -174,7 +185,15 @@ fn build_remote_map_incremental(
 
 fn upload_one_blocking(client: &reqwest::blocking::Client, base_url: &str, sys_session_id: i32, root: &Path, file_path: &Path, is_auto: bool) -> Result<()> {
     let dest_path = normalize_rel(root, file_path);
-    let url = format!("{}/sync/upload", base_url.trim_end_matches('/'));
+    let url = format!("{}/api/sync/upload", base_url.trim_end_matches('/'));
+    tracing::debug!(
+        session_id = sys_session_id,
+        is_auto,
+        base_url = %base_url,
+        url = %url,
+        file = %dest_path,
+        "upload url resolved"
+    );
     let local_mtime_ms = std::fs::metadata(file_path).ok().map(|m| file_mtime_millis(&m)).unwrap_or(0);
     let file_size = std::fs::metadata(file_path).map(|m| m.len()).unwrap_or(0);
     tracing::trace!(session_id = sys_session_id, file = %dest_path, size = file_size, mtime = local_mtime_ms, is_auto, "upload_one_blocking start");
@@ -192,20 +211,20 @@ fn upload_one_blocking(client: &reqwest::blocking::Client, base_url: &str, sys_s
     let resp = match client.post(url).multipart(form).send() {
         Ok(r) => r,
         Err(e) => {
-            use std::error::Error as StdError;
-            let mut chain = String::new();
-            let mut src = e.source();
-            while let Some(s) = src {
-                chain.push_str(" -> ");
-                chain.push_str(&format!("{}", s));
-                src = s.source();
-            }
+            let chain = e.to_string();
             tracing::error!(session_id = sys_session_id, file = %dest_path, err = %e, chain = %chain, is_auto, "upload send error");
             return Err(e.into());
         }
     };
     if !resp.status().is_success() {
-        tracing::warn!(session_id = sys_session_id, file = %dest_path, status = ?resp.status(), is_auto, "upload failed status");
+        tracing::warn!(
+            session_id = sys_session_id,
+            file = %dest_path,
+            status = ?resp.status(),
+            base_url = %base_url,
+            is_auto,
+            "upload failed status"
+        );
         anyhow::bail!("upload failed: {}", resp.status());
     }
     tracing::trace!(session_id = sys_session_id, file = %dest_path, is_auto, "upload success");
@@ -234,7 +253,7 @@ fn upload_with_dest_blocking(
     dest_path: &str,
     is_auto: bool,
 ) -> Result<()> {
-    let url = format!("{}/sync/upload", base_url.trim_end_matches('/'));
+    let url = format!("{}/api/sync/upload", base_url.trim_end_matches('/'));
     let local_mtime_ms = std::fs::metadata(src_file_path).ok().map(|m| file_mtime_millis(&m)).unwrap_or(0);
     let file_size = std::fs::metadata(src_file_path).map(|m| m.len()).unwrap_or(0);
     tracing::trace!(session_id = sys_session_id, file = %dest_path, size = file_size, mtime = local_mtime_ms, is_auto, "upload_with_dest_blocking start");
@@ -340,33 +359,138 @@ fn should_exclude(rel_path: &str, filters: &str) -> bool {
     false
 }
 
+// --- Auto Sync Upload Queue ---
+#[derive(Clone, Debug)]
+struct AutoUploadJob {
+    user_id: i32,
+    session_id: i32,
+    root: PathBuf,
+    rel: String,
+    full_path: PathBuf,
+}
+
+static AUTO_UPLOAD_QUEUE: Lazy<std::sync::mpsc::SyncSender<AutoUploadJob>> = Lazy::new(|| {
+    let (tx, rx) = std::sync::mpsc::sync_channel::<AutoUploadJob>(4096);
+    let rx = Arc::new(std::sync::Mutex::new(rx));
+
+    let concurrency: usize = std::env::var("WESYNC_AUTO_UPLOAD_CONCURRENCY")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|&n| n > 0 && n <= 16)
+        .unwrap_or(4);
+
+    // Spawn background workers to consume queue
+    for worker_id in 0..concurrency {
+        let rx = Arc::clone(&rx);
+        std::thread::spawn(move || {
+            loop {
+                let job = {
+                    let guard = rx.lock().expect("auto-upload queue mutex poisoned");
+                    guard.recv()
+                };
+                let Ok(job) = job else { break; };
+
+                 // file might be deleted shortly after event
+                 let meta = match std::fs::metadata(&job.full_path) {
+                     Ok(m) => m,
+                     Err(e) => {
+                         tracing::debug!(
+                             session_id = job.session_id,
+                             user_id = job.user_id,
+                             file = %job.rel,
+                             worker = worker_id,
+                             error = %e,
+                             "auto-upload skip: metadata failed"
+                         );
+                         continue;
+                     }
+                 };
+
+                 let size = meta.len();
+                 let mtime_ms = file_mtime_millis(&meta);
+
+                // lookup cached base_url/token
+                let auth = AUTO_UPLOAD_AUTH.lock().get(&job.session_id).cloned();
+                let Some(auth) = auth else {
+                    tracing::warn!(session_id = job.session_id, user_id = job.user_id, worker = worker_id, "auto-upload: missing cached auth");
+                    continue;
+                };
+
+                let base_url = auth.base_url.clone();
+                let token_opt: Option<String> = auth.token.clone();
+
+                tracing::debug!(
+                    session_id = job.session_id,
+                    user_id = job.user_id,
+                    worker = worker_id,
+                    base_url = %base_url,
+                    token_present = token_opt.is_some(),
+                    "auto-upload using cached auth"
+                );
+
+                 // Validate base_url to avoid "relative URL without a base"
+                 if !(base_url.starts_with("http://") || base_url.starts_with("https://")) {
+                     tracing::warn!(session_id = job.session_id, user_id = job.user_id, worker = worker_id, base_url = %base_url, "auto-upload: invalid endpoint");
+                     continue;
+                 }
+
+                 // Build a blocking client; apply Authorization header if present
+                 let mut client_builder = reqwest::blocking::Client::builder();
+                 if let Some(t) = token_opt {
+                     let mut headers = reqwest::header::HeaderMap::new();
+                     if let Ok(hval) = reqwest::header::HeaderValue::from_str(t.as_str()) {
+                         headers.insert(reqwest::header::AUTHORIZATION, hval);
+                     }
+                     client_builder = client_builder.default_headers(headers);
+                 }
+                 let client = match client_builder.build() {
+                     Ok(c) => c,
+                     Err(e) => {
+                         tracing::warn!(session_id = job.session_id, user_id = job.user_id, worker = worker_id, error = %e, "auto-upload: build http client failed");
+                         continue;
+                     }
+                 };
+
+                 tracing::info!(
+                     session_id = job.session_id,
+                     user_id = job.user_id,
+                     worker = worker_id,
+                     file = %job.rel,
+                     size,
+                     mtime = mtime_ms,
+                     "auto-upload start"
+                 );
+
+                 if let Err(e) = upload_one_blocking(&client, &auth.base_url, job.session_id, &job.root, &job.full_path, true) {
+                     tracing::warn!(session_id = job.session_id, user_id = job.user_id, worker = worker_id, file = %job.rel, error = %e, "auto-upload failed");
+                 } else {
+                     tracing::debug!(session_id = job.session_id, user_id = job.user_id, worker = worker_id, file = %job.rel, "auto-upload done");
+                 }
+            }
+        });
+    }
+
+    tx
+});
+
 // --- Auto Sync Watcher ---
 fn spawn_watcher(session_id: i32, user_id: i32, root: PathBuf, base_url: String, token: Option<String>, cancel: Arc<AtomicBool>) -> Result<()> {
     use notify::{RecommendedWatcher, RecursiveMode, Watcher};
     if !root.exists() { anyhow::bail!("wx_dir not found"); }
-    tracing::info!(session_id, user_id, path = %root.display(), "spawn_watcher start");
+
+    tracing::info!(session_id, user_id, path = %root.display(), base_url = %base_url, "spawn_watcher start");
+
+    // Cache base_url/token for this session; workers will use it.
+    let token_for_cache = token.clone();
+    {
+        let mut auth_map = AUTO_UPLOAD_AUTH.lock();
+        auth_map.insert(session_id, AutoUploadAuth { base_url: base_url.clone(), token: token_for_cache });
+    }
 
     std::thread::spawn(move || {
-        let client = {
-            let mut builder = reqwest::blocking::Client::builder();
-            use std::time::Duration;
-            if let Some(t) = token.clone() {
-                use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
-                let mut headers = HeaderMap::new();
-                if let Ok(hval) = HeaderValue::from_str(&t) { headers.insert(AUTHORIZATION, hval); }
-                builder = builder
-                    .default_headers(headers)
-                    .connect_timeout(Duration::from_secs(10))
-                    .tcp_keepalive(Duration::from_secs(30))
-                    // 设定较长的请求总超时，避免大文件上传过程中客户端超时
-                    .timeout(Duration::from_secs(1800));
-            }
-            builder.build().unwrap()
-        };
-
         use std::collections::BTreeMap;
         use std::time::{Duration, Instant};
-        let mut last_upload: BTreeMap<String, Instant> = BTreeMap::new();
+        let mut last_enqueue: BTreeMap<String, Instant> = BTreeMap::new();
 
         let filter_str = load_session_config(session_id, user_id).and_then(|c| c.sync_filters).unwrap_or_default();
         tracing::debug!(session_id, user_id, filters_len = filter_str.len(), "watcher loaded filters");
@@ -376,32 +500,52 @@ fn spawn_watcher(session_id: i32, user_id: i32, root: PathBuf, base_url: String,
         watcher.watch(&root, RecursiveMode::Recursive).expect("watch start");
         tracing::info!(session_id, "watcher active");
 
-        // watcher loop
         while !cancel.load(Ordering::Relaxed) {
             let Ok(res) = rx.recv_timeout(Duration::from_millis(500)) else { continue; };
             let evt = match res { Ok(e) => e, Err(err) => { tracing::warn!(session_id, error = %err, "watch event error"); continue } };
             let kind = evt.kind;
             let relevant = matches!(kind, notify::event::EventKind::Create(_) | notify::event::EventKind::Modify(_));
             if !relevant { continue; }
+
             for path in evt.paths.into_iter() {
                 if cancel.load(Ordering::Relaxed) { break; }
                 if path.is_dir() { continue; }
+
                 let rel = normalize_rel(&root, &path);
                 if rel == "." { continue; }
                 if !filter_str.is_empty() && should_exclude(&rel, &filter_str) { continue; }
+
+                // debounce enqueue per file
                 let now = Instant::now();
-                let overdue = last_upload.get(&rel).map(|t| now.duration_since(*t) > Duration::from_millis(800)).unwrap_or(true);
+                let overdue = last_enqueue.get(&rel).map(|t| now.duration_since(*t) > Duration::from_millis(800)).unwrap_or(true);
                 if !overdue { continue; }
-                last_upload.insert(rel.clone(), now);
-                let _ = upload_one_blocking(&client, &base_url, session_id, &root, &path, true);
-                tracing::trace!(session_id, file = %rel, "auto-sync uploaded changed file");
+                last_enqueue.insert(rel.clone(), now);
+
+                let job = AutoUploadJob {
+                    user_id,
+                    session_id,
+                    root: root.clone(),
+                    rel: rel.clone(),
+                    full_path: path.clone(),
+                };
+
+                match AUTO_UPLOAD_QUEUE.try_send(job) {
+                    Ok(_) => tracing::trace!(session_id, file = %rel, "auto-sync enqueued changed file"),
+                    Err(e) => tracing::warn!(session_id, file = %rel, error = %e, "auto-sync queue full, drop event"),
+                }
             }
         }
+
         tracing::info!(session_id, "watcher thread exiting");
-        // 线程退出时清理活跃集合（如果未显式 stop 也能被重启）
+
+        // Remove auth cache when watcher exits
+        {
+            let mut auth_map = AUTO_UPLOAD_AUTH.lock();
+            auth_map.remove(&session_id);
+        }
+
         let mut active = ACTIVE_AUTO_SESSIONS.lock();
         active.remove(&session_id);
-        // 不移除 WATCHERS：stop_auto_sync 已负责；若线程自然退出，可在下一次启动前覆盖
     });
 
     Ok(())
@@ -590,14 +734,7 @@ pub async fn start_sync(
                                      // 调用解密
                                      if let Err(e) = crate::internal::windows::db_decrypt::decrypt_db_file_v4(&file, db_key_hex, &decoded_path) {
                                          // 解析失败：打印失败日志与异常链
-                                         use std::error::Error as StdError;
-                                         let mut chain = String::new();
-                                         let mut src = e.source();
-                                         while let Some(s) = src {
-                                             chain.push_str(" -> ");
-                                             chain.push_str(&format!("{}", s));
-                                             src = s.source();
-                                         }
+                                         let chain = e.to_string();
                                          tracing::error!(
                                              session_id = sys_session_id,
                                              file = %rel,
@@ -773,7 +910,12 @@ pub async fn stop_auto_sync(sys_session_id: i32, user_id: i32) -> Result<(), Str
          let mut active = ACTIVE_AUTO_SESSIONS.lock();
          active.remove(&sys_session_id);
      }
-    tracing::info!(session_id = sys_session_id, user_id, "stop_auto_sync");
+    // best-effort: remove auth cache immediately; watcher thread also removes on exit
+    {
+        let mut auth_map = AUTO_UPLOAD_AUTH.lock();
+        auth_map.remove(&sys_session_id);
+    }
+     tracing::info!(session_id = sys_session_id, user_id, "stop_auto_sync");
      let mut cfg = load_session_config(sys_session_id, user_id).unwrap_or_default();
      cfg.auto_sync = Some(false);
      save_session_config_inner(sys_session_id, user_id, &cfg).map_err(|e| e.to_string())?;

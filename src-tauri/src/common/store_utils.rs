@@ -10,7 +10,6 @@ pub fn get_settings_store(app: &AppHandle) -> Arc<tauri_plugin_store::Store<Wry>
         app.path()
             .app_data_dir()
             .expect("app_data_dir not found")
-            .join(".store")
             .join("settings.json"),
     )
     .build()
