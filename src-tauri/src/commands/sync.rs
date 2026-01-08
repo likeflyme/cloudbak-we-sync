@@ -554,23 +554,44 @@ fn spawn_watcher(session_id: i32, user_id: i32, root: PathBuf, base_url: String,
 #[tauri::command]
 pub async fn start_sync(
     sys_session_id: i32,
-    user_id: i32,
     wx_dir: String,
-    base_url: String,
-    token: Option<String>,
     full: Option<bool>,
     auth_state: tauri::State<'_, AuthState>,
+    app: AppHandle,
 ) -> Result<String, String> {
-    tracing::info!(session_id = sys_session_id, user_id, %wx_dir, %base_url, full = ?full, "start_sync invoked");
-     let token = token.or_else(|| auth_state.0.lock().as_ref().and_then(|c| c.token.clone()));
-     let root = PathBuf::from(wx_dir);
-     if !root.exists() {
-        tracing::warn!(?root, "wx_dir not found");
-         return Err("wx_dir not found".into());
-     }
-     let task_id = sys_session_id.to_string();
+    // Use ONLY values from store_utils; do not fall back to request args.
+    let user_id = crate::common::store_utils::get_user_id(&app)
+        .ok_or_else(|| "missing user_id in settings store".to_string())?;
+    let base_url = crate::common::store_utils::get_endpoint(&app)
+        .ok_or_else(|| "missing endpoint in settings store".to_string())?;
 
-     tracing::info!("task sync initialized");
+    // Ensure we consistently use the same API base.
+    // Our upload uses "{base}/api/sync/upload"; list should use "{base}/api/sync/list".
+    let base_url = {
+        let trimmed = base_url.trim_end_matches('/');
+        if trimmed.ends_with("/api") {
+            trimmed.to_string()
+        } else {
+            format!("{}/api", trimmed)
+        }
+    };
+
+    let token = crate::common::store_utils::get_token(&app)
+        .or_else(|| auth_state.0.lock().as_ref().and_then(|c| c.token.clone()));
+
+    if token.is_none() {
+        return Err("missing token in settings store".to_string());
+    }
+
+    tracing::info!(session_id = sys_session_id, user_id, %wx_dir, %base_url, full = ?full, "start_sync invoked");
+    let root = PathBuf::from(wx_dir);
+    if !root.exists() {
+        tracing::warn!(?root, "wx_dir not found");
+        return Err("wx_dir not found".into());
+    }
+    let task_id = sys_session_id.to_string();
+
+    tracing::info!("task sync initialized");
 
      // cancel existing task if any
      if let Some(old) = TASKS.lock().remove(&task_id) { old.cancel.store(true, Ordering::Relaxed); }

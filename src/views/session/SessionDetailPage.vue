@@ -253,14 +253,9 @@ const handleSync = async (key: string) => {
   if (!session.value || syncing.value) return
   const full = key === 'full'
   try {
-    const baseUrl = endpoint() + '/api'
-    const t = getToken() || undefined
     const id = await invoke<string>('start_sync', {
       sysSessionId: session.value.id,
-      userId,
       wxDir: session.value.wx_dir,
-      baseUrl,
-      token: t,
       full,
     })
     taskId.value = id
