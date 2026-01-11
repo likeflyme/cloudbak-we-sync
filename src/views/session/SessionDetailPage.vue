@@ -61,6 +61,7 @@ import { deleteSession as deleteSessionFromServer } from '@/api/user'
 import { invoke } from '@tauri-apps/api/core'
 import { endpoint, token as getToken } from '@/common/login'
 import { decrypt } from '@/api/task' // 新增: 同步完成后调用解密任务
+import { getSysInfoFromStore } from '@/common/store'
 
 const userId = Number(localStorage.getItem('user_id') || '0')
 
@@ -211,7 +212,21 @@ const load = async () => {
   }
 }
 
-onMounted(load)
+const loadServerVersionFromStore = async () => {
+  try {
+    const info: any = await getSysInfoFromStore<any>()
+    serverVersion.value = String(info?.sys_version || '').trim()
+  } catch (e) {
+    // ignore; will be validated on sync
+    serverVersion.value = ''
+  }
+}
+
+onMounted(async () => {
+  await loadServerVersionFromStore()
+  await load()
+})
+
 watch(() => route.params.id, () => { stopPolling(); load() })
 
 const toggleAutoSync = async () => {
@@ -249,8 +264,37 @@ const updateSyncFilters = (value: string) => {
   session.value.syncFilters = value
 }
 
+const MIN_SERVER_VERSION = '2.0.7'
+
+const parseSemver = (v: string): [number, number, number] => {
+  const s = String(v || '').trim()
+  const m = s.match(/(\d+)\.(\d+)\.(\d+)/)
+  if (!m) return [0, 0, 0]
+  return [Number(m[1]) || 0, Number(m[2]) || 0, Number(m[3]) || 0]
+}
+
+const gteSemver = (a: string, b: string) => {
+  const [a1, a2, a3] = parseSemver(a)
+  const [b1, b2, b3] = parseSemver(b)
+  if (a1 !== b1) return a1 > b1
+  if (a2 !== b2) return a2 > b2
+  return a3 >= b3
+}
+
+const serverVersion = ref<string>('')
+
 const handleSync = async (key: string) => {
   if (!session.value || syncing.value) return
+
+  // Require server version >= 2.0.7
+  if (!serverVersion.value) {
+    await loadServerVersionFromStore()
+  }
+  if (!serverVersion.value || !gteSemver(serverVersion.value, MIN_SERVER_VERSION)) {
+    message.error(`服务端版本需 >= ${MIN_SERVER_VERSION} 才能同步（当前：${serverVersion.value || 'unknown'}）,更新后需重新登陆客户端。`)
+    return
+  }
+
   const full = key === 'full'
   try {
     const id = await invoke<string>('start_sync', {

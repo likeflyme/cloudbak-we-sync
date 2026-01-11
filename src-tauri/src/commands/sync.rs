@@ -185,7 +185,7 @@ fn build_remote_map_incremental(
 
 fn upload_one_blocking(client: &reqwest::blocking::Client, base_url: &str, sys_session_id: i32, root: &Path, file_path: &Path, is_auto: bool) -> Result<()> {
     let dest_path = normalize_rel(root, file_path);
-    let url = format!("{}/api/sync/upload", base_url.trim_end_matches('/'));
+    let url = api_url(base_url, "sync/upload");
     tracing::debug!(
         session_id = sys_session_id,
         is_auto,
@@ -253,7 +253,7 @@ fn upload_with_dest_blocking(
     dest_path: &str,
     is_auto: bool,
 ) -> Result<()> {
-    let url = format!("{}/api/sync/upload", base_url.trim_end_matches('/'));
+    let url = api_url(base_url, "sync/upload");
     let local_mtime_ms = std::fs::metadata(src_file_path).ok().map(|m| file_mtime_millis(&m)).unwrap_or(0);
     let file_size = std::fs::metadata(src_file_path).map(|m| m.len()).unwrap_or(0);
     tracing::trace!(session_id = sys_session_id, file = %dest_path, size = file_size, mtime = local_mtime_ms, is_auto, "upload_with_dest_blocking start");
@@ -551,6 +551,155 @@ fn spawn_watcher(session_id: i32, user_id: i32, root: PathBuf, base_url: String,
     Ok(())
 }
 
+fn normalize_api_base(base_url: &str) -> String {
+    // base_url from settings should be server origin, but can include /api or /app due to older configs.
+    // Normalize to origin (no trailing /api or /app), no trailing '/'.
+    let trimmed = base_url.trim_end_matches('/');
+    let trimmed = trimmed.trim_end_matches("/api").trim_end_matches("/app");
+    trimmed.to_string()
+}
+
+fn api_url(origin: &str, path: &str) -> String {
+    let origin = origin.trim_end_matches('/');
+    let path = path.trim_start_matches('/');
+    format!("{}/api/{}", origin, path)
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ScanResponse {
+    ok: bool,
+    #[serde(flatten)]
+    extra: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct CheckScanResponse {
+    end: bool,
+}
+
+#[derive(Debug, Clone)]
+struct RemoteDbEntry {
+    path: String,
+    is_dir: bool,
+    size: u64,
+    mtime_ms: i64,
+}
+
+fn cache_sync_db_path(user_id: i32, sys_session_id: i32) -> Result<PathBuf> {
+    let base = crate::internal::app_paths::app_data_dir()?;
+    // cache under per-user folder to avoid collisions
+    let dir = base
+        .join("users")
+        .join(user_id.to_string())
+        .join("cache")
+        .join("syncdb");
+    std::fs::create_dir_all(&dir)?;
+    Ok(dir.join(format!("sync_{}.db", sys_session_id)))
+}
+
+fn trigger_remote_scan_blocking(
+    client: &reqwest::blocking::Client,
+    base_url: &str,
+    sys_session_id: i32,
+) -> Result<()> {
+    let url = format!("{}?sys_session_id={}", api_url(base_url, "sync/scan"), sys_session_id);
+    tracing::info!(session_id = sys_session_id, %url, "trigger remote scan");
+    let resp = client.post(url).send()?;
+    if !resp.status().is_success() {
+        anyhow::bail!("scan failed: {}", resp.status());
+    }
+    // best-effort parse; server returns {ok: true, ...}
+    let _ = resp.json::<ScanResponse>();
+    Ok(())
+}
+
+fn wait_remote_scan_end_blocking(
+    client: &reqwest::blocking::Client,
+    base_url: &str,
+    sys_session_id: i32,
+    cancel: &AtomicBool,
+) -> Result<()> {
+    use std::time::{Duration, Instant};
+
+    let url = format!("{}?sys_session_id={}", api_url(base_url, "sync/check_scan"), sys_session_id);
+
+    let started = Instant::now();
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            anyhow::bail!("cancelled");
+        }
+
+        let resp = client.post(url.clone()).send()?;
+        if !resp.status().is_success() {
+            anyhow::bail!("check_scan failed: {}", resp.status());
+        }
+        let body: CheckScanResponse = resp.json()?;
+        if body.end {
+            tracing::info!(session_id = sys_session_id, elapsed_ms = started.elapsed().as_millis() as u64, "remote scan finished");
+            return Ok(());
+        }
+
+        std::thread::sleep(Duration::from_secs(1));
+    }
+}
+
+fn download_sync_db_blocking(
+    client: &reqwest::blocking::Client,
+    base_url: &str,
+    sys_session_id: i32,
+    target_path: &Path,
+) -> Result<()> {
+    let url = format!("{}?sys_session_id={}", api_url(base_url, "sync/download_sync_db"), sys_session_id);
+    tracing::info!(session_id = sys_session_id, %url, path = %target_path.display(), "download sync.db");
+
+    let mut resp = client.post(url).send()?;
+    if !resp.status().is_success() {
+        anyhow::bail!("download_sync_db failed: {}", resp.status());
+    }
+
+    let mut f = std::fs::File::create(target_path)?;
+    std::io::copy(&mut resp, &mut f)?;
+    Ok(())
+}
+
+fn remote_map_from_sync_db(db_path: &Path) -> Result<HashMap<String, RemoteEntry>> {
+    // table schema:
+    // files(path TEXT PRIMARY KEY, is_dir INTEGER NOT NULL, size INTEGER NOT NULL, mtime INTEGER NOT NULL)
+    let conn = rusqlite::Connection::open(db_path)?;
+    let mut stmt = conn.prepare("SELECT path, is_dir, size, mtime FROM files")?;
+
+    let rows = stmt.query_map([], |row| {
+        let path: String = row.get(0)?;
+        let is_dir_i: i64 = row.get(1)?;
+        let size_i: i64 = row.get(2)?;
+        let mtime_i: i64 = row.get(3)?;
+
+        Ok(RemoteDbEntry {
+            path,
+            is_dir: is_dir_i != 0,
+            size: size_i.max(0) as u64,
+            mtime_ms: mtime_i,
+        })
+    })?;
+
+    let mut map: HashMap<String, RemoteEntry> = HashMap::new();
+    for r in rows {
+        let r = r?;
+        map.insert(
+            r.path.clone(),
+            RemoteEntry {
+                path: r.path,
+                is_dir: r.is_dir,
+                size: Some(r.size),
+                // store ms in f64 to keep using existing normalize_remote_mtime_to_ms logic
+                mtime: Some(r.mtime_ms as f64),
+            },
+        );
+    }
+
+    Ok(map)
+}
+
 #[tauri::command]
 pub async fn start_sync(
     sys_session_id: i32,
@@ -565,15 +714,15 @@ pub async fn start_sync(
     let base_url = crate::common::store_utils::get_endpoint(&app)
         .ok_or_else(|| "missing endpoint in settings store".to_string())?;
 
-    // Ensure we consistently use the same API base.
-    // Our upload uses "{base}/api/sync/upload"; list should use "{base}/api/sync/list".
+    // IMPORTANT: keep `base_url` as server ORIGIN (no /api and no /app).
+    // Upload helpers already append `/api/sync/*`.
+    // Manual sync helper endpoints (scan/check/download) should also be called under `/api/sync/*`.
     let base_url = {
         let trimmed = base_url.trim_end_matches('/');
-        if trimmed.ends_with("/api") {
-            trimmed.to_string()
-        } else {
-            format!("{}/api", trimmed)
-        }
+        let trimmed = trimmed
+            .trim_end_matches("/app")
+            .trim_end_matches("/api");
+        trimmed.to_string()
     };
 
     let token = crate::common::store_utils::get_token(&app)
@@ -593,107 +742,168 @@ pub async fn start_sync(
 
     tracing::info!("task sync initialized");
 
-     // cancel existing task if any
-     if let Some(old) = TASKS.lock().remove(&task_id) { old.cancel.store(true, Ordering::Relaxed); }
+    // cancel existing task if any
+    if let Some(old) = TASKS.lock().remove(&task_id) { old.cancel.store(true, Ordering::Relaxed); }
     tracing::info!(session_id = sys_session_id, "previous task (if any) cancelled");
 
-     let task = Task::new();
-     TASKS.lock().insert(task_id.clone(), task.clone());
+    let task = Task::new();
+    TASKS.lock().insert(task_id.clone(), task.clone());
     tracing::info!(task_id = %task_id, "sync task created");
 
-     // Move heavy/blocking network work entirely into a dedicated OS thread
-     std::thread::spawn(move || {
+    // Move heavy/blocking network work entirely into a dedicated OS thread
+    std::thread::spawn(move || {
         tracing::info!(session_id = sys_session_id, "sync thread started");
-         // Build a blocking client in this thread to avoid interacting with the Tokio runtime
-         let client = {
-             let mut builder = reqwest::blocking::Client::builder();
-             use std::time::Duration;
-             if let Some(t) = token.clone() {
+
+        // Build a blocking client in this thread to avoid interacting with the Tokio runtime
+        let client = {
+            let mut builder = reqwest::blocking::Client::builder();
+            use std::time::Duration;
+            if let Some(t) = token.clone() {
                 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
-                 let mut headers = HeaderMap::new();
-                 if let Ok(hval) = HeaderValue::from_str(&t) { headers.insert(AUTHORIZATION, hval); }
-                 builder = builder
-                     .default_headers(headers)
-                     .connect_timeout(Duration::from_secs(10))
-                     .tcp_keepalive(Duration::from_secs(30))
-                     .timeout(Duration::from_secs(1800));
-             }
-             // Safe to unwrap here; if it fails, record error below
-             match builder.build() {
+                let mut headers = HeaderMap::new();
+                if let Ok(hval) = HeaderValue::from_str(&t) { headers.insert(AUTHORIZATION, hval); }
+                builder = builder
+                    .default_headers(headers)
+                    .connect_timeout(Duration::from_secs(10))
+                    .tcp_keepalive(Duration::from_secs(30))
+                    .timeout(Duration::from_secs(1800));
+            }
+            match builder.build() {
                 Ok(c) => c,
                 Err(e) => {
                     tracing::error!(error = %e, "http client build error");
-                     let mut s = task.status.lock();
-                     s.state = "error".into();
-                     s.message = Some(format!("http client build error: {}", e));
-                     return;
+                    let mut s = task.status.lock();
+                    s.state = "error".into();
+                    s.message = Some(format!("http client build error: {}", e));
+                    return;
                 }
-             }
-         };
+            }
+        };
 
-         {
-             let mut status = task.status.lock();
-             status.state = "running".into();
-             status.message = Some("scanning".into());
-         }
+        {
+            let mut status = task.status.lock();
+            status.state = "running".into();
+            status.message = Some("remote scanning".into());
+        }
 
-         let remote_map = match build_remote_map_incremental(&client, &base_url, sys_session_id) {
-             Ok(m) => m,
-             Err(e) => {
-                tracing::error!(error = %e, session_id = sys_session_id, "remote list error");
-                 let mut s = task.status.lock();
-                 s.state = "error".into();
-                 s.message = Some(format!("remote list error: {}", e));
-                 return;
-             }
-         };
+        // 1) trigger scan
+        if let Err(e) = trigger_remote_scan_blocking(&client, &base_url, sys_session_id) {
+            tracing::error!(error = %e, session_id = sys_session_id, "remote scan trigger error");
+            let mut s = task.status.lock();
+            s.state = "error".into();
+            s.message = Some(format!("remote scan trigger error: {}", e));
+            return;
+        }
 
-         let mut to_upload: Vec<PathBuf> = Vec::new();
-         // load filters if any (exclusion rules)
-         let cfg = load_session_config(sys_session_id, user_id);
-         let filter_str = cfg.and_then(|c| c.sync_filters).unwrap_or_default();
-    tracing::info!(session_id = sys_session_id, filters_len = filter_str.len(), "begin scanning files");
-         for entry in WalkDir::new(&root).into_iter().filter_map(|e| e.ok()) {
-             if task.cancel.load(Ordering::Relaxed) { break; }
-             let path = entry.path();
-             if path.is_dir() { continue; }
-             let rel = normalize_rel(&root, path);
-             if rel == "." { continue; }
-             // exclusion check: if matches any rule -> skip
-             if !filter_str.is_empty() && should_exclude(&rel, &filter_str) {
-                 let mut s = task.status.lock();
-                 s.skipped += 1;
-                 continue;
-             }
-             let meta = match std::fs::metadata(path) { Ok(m) => m, Err(_) => continue };
-             let size = meta.len();
-             let mtime_ms = file_mtime_millis(&meta);
-             let should_upload = match remote_map.get(&rel) {
-                 None => true,
-                 Some(rem) => {
-                     if rem.is_dir { true } else {
-                         let remote_ms = normalize_remote_mtime_to_ms(rem.mtime);
-                         rem.size.unwrap_or(0) != size || !same_mtime(mtime_ms, remote_ms)
-                     }
-                 }
-             };
-             {
-                 let mut s = task.status.lock();
-                 s.scanned += 1;
-             }
-             if should_upload || full.unwrap_or(false) {
-                 to_upload.push(path.to_path_buf());
-             } else {
-                 let mut s2 = task.status.lock();
-                 s2.skipped += 1;
-             }
-         }
+        // 2) poll check_scan every 1s
+        if let Err(e) = wait_remote_scan_end_blocking(&client, &base_url, sys_session_id, &task.cancel) {
+            // cancelled is treated as stopped
+            if e.to_string().contains("cancelled") {
+                let mut s = task.status.lock();
+                s.state = "stopped".into();
+                s.message = Some("stopped by user".into());
+                return;
+            }
+            tracing::error!(error = %e, session_id = sys_session_id, "remote scan check error");
+            let mut s = task.status.lock();
+            s.state = "error".into();
+            s.message = Some(format!("remote scan check error: {}", e));
+            return;
+        }
 
-         {
-             let mut s = task.status.lock();
-             s.to_upload = to_upload.len() as u64;
-             s.message = Some("uploading".into());
-         }
+        // 3) download sync.db
+        {
+            let mut status = task.status.lock();
+            status.message = Some("downloading sync db".into());
+        }
+
+        let sync_db_path = match cache_sync_db_path(user_id, sys_session_id) {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::error!(error = %e, session_id = sys_session_id, "prepare cache path failed");
+                let mut s = task.status.lock();
+                s.state = "error".into();
+                s.message = Some(format!("prepare cache path failed: {}", e));
+                return;
+            }
+        };
+
+        if let Err(e) = download_sync_db_blocking(&client, &base_url, sys_session_id, &sync_db_path) {
+            tracing::error!(error = %e, session_id = sys_session_id, "download sync db error");
+            let mut s = task.status.lock();
+            s.state = "error".into();
+            s.message = Some(format!("download sync db error: {}", e));
+            return;
+        }
+
+        // 4) load remote map from sqlite
+        {
+            let mut status = task.status.lock();
+            status.message = Some("loading remote index".into());
+        }
+
+        let remote_map = match remote_map_from_sync_db(&sync_db_path) {
+            Ok(m) => m,
+            Err(e) => {
+                tracing::error!(error = %e, session_id = sys_session_id, path = %sync_db_path.display(), "read sync db error");
+                let mut s = task.status.lock();
+                s.state = "error".into();
+                s.message = Some(format!("read sync db error: {}", e));
+                return;
+            }
+        };
+
+        // best-effort cleanup: remove cached db after read
+        let _ = std::fs::remove_file(&sync_db_path);
+
+        // --- existing diff/upload logic below (unchanged) ---
+        let mut to_upload: Vec<PathBuf> = Vec::new();
+        // load filters if any (exclusion rules)
+        let cfg = load_session_config(sys_session_id, user_id);
+        let filter_str = cfg.and_then(|c| c.sync_filters).unwrap_or_default();
+        tracing::info!(session_id = sys_session_id, filters_len = filter_str.len(), "begin scanning files");
+
+        for entry in WalkDir::new(&root).into_iter().filter_map(|e| e.ok()) {
+            if task.cancel.load(Ordering::Relaxed) { break; }
+            let path = entry.path();
+            if path.is_dir() { continue; }
+            let rel = normalize_rel(&root, path);
+            if rel == "." { continue; }
+            // exclusion check: if matches any rule -> skip
+            if !filter_str.is_empty() && should_exclude(&rel, &filter_str) {
+                let mut s = task.status.lock();
+                s.skipped += 1;
+                continue;
+            }
+            let meta = match std::fs::metadata(path) { Ok(m) => m, Err(_) => continue };
+            let size = meta.len();
+            let mtime_ms = file_mtime_millis(&meta);
+            let should_upload = match remote_map.get(&rel) {
+                None => true,
+                Some(rem) => {
+                    if rem.is_dir { true } else {
+                        let remote_ms = normalize_remote_mtime_to_ms(rem.mtime);
+                        rem.size.unwrap_or(0) != size || !same_mtime(mtime_ms, remote_ms)
+                    }
+                }
+            };
+            {
+                let mut s = task.status.lock();
+                s.scanned += 1;
+            }
+            if should_upload || full.unwrap_or(false) {
+                to_upload.push(path.to_path_buf());
+            } else {
+                let mut s2 = task.status.lock();
+                s2.skipped += 1;
+            }
+        }
+
+        {
+            let mut s = task.status.lock();
+            s.to_upload = to_upload.len() as u64;
+            s.message = Some("uploading".into());
+        }
     tracing::info!(session_id = sys_session_id, to_upload = to_upload.len(), "upload phase start");
 
          // 读取“本地解析”开关
@@ -958,7 +1168,7 @@ pub async fn init_user_auto_sync(app: AppHandle) -> Result<u32, String> {
         tracing::info!("init_user_auto_sync skipped: missing user_id/endpoint/token");
         return Ok(0);
     }
-    let base_url = endpoint.unwrap(); // 修复 base_url 未定义
+    let base_url = normalize_api_base(&endpoint.unwrap());
     use std::fs;
     let base = crate::internal::app_paths::app_data_dir().map_err(|e| e.to_string())?;
     let sess_dir = base.join("users").join(user_id.unwrap().to_string()).join("sessions");

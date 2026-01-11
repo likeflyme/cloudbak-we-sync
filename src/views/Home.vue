@@ -287,12 +287,7 @@ const loadSessions = () => {
     sessions.value = uniq
     // initialize auto sync watchers for sessions marked auto_sync
     try {
-      getUserInfoFromStore().then(async (info) => {
-        const baseUrl = endpoint() + '/api';
-        const t = getToken() || undefined;
-        const userId = info.id;
-        invoke('init_user_auto_sync').catch(() => {})
-      })
+      invoke('init_user_auto_sync').catch(() => {})
     } catch {}
   }).finally(() => {
     isLoadingSessions.value = false
