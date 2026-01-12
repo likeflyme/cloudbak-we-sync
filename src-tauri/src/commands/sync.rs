@@ -478,6 +478,9 @@ fn spawn_watcher(session_id: i32, user_id: i32, root: PathBuf, base_url: String,
     use notify::{RecommendedWatcher, RecursiveMode, Watcher};
     if !root.exists() { anyhow::bail!("wx_dir not found"); }
 
+    // IMPORTANT: normalize to origin only (no /api or /app) to avoid /api/api/*
+    let base_url = normalize_api_base(&base_url);
+
     tracing::info!(session_id, user_id, path = %root.display(), base_url = %base_url, "spawn_watcher start");
 
     // Cache base_url/token for this session; workers will use it.
@@ -554,12 +557,18 @@ fn spawn_watcher(session_id: i32, user_id: i32, root: PathBuf, base_url: String,
 fn normalize_api_base(base_url: &str) -> String {
     // base_url from settings should be server origin, but can include /api or /app due to older configs.
     // Normalize to origin (no trailing /api or /app), no trailing '/'.
-    let trimmed = base_url.trim_end_matches('/');
+    let mut trimmed = base_url.trim();
+    // strip query/fragment if someone pasted full url
+    if let Some(i) = trimmed.find('#') { trimmed = &trimmed[..i]; }
+    if let Some(i) = trimmed.find('?') { trimmed = &trimmed[..i]; }
+    let trimmed = trimmed.trim_end_matches('/');
     let trimmed = trimmed.trim_end_matches("/api").trim_end_matches("/app");
     trimmed.to_string()
 }
 
 fn api_url(origin: &str, path: &str) -> String {
+    // Defensively normalize again in case callers pass legacy values.
+    let origin = normalize_api_base(origin);
     let origin = origin.trim_end_matches('/');
     let path = path.trim_start_matches('/');
     format!("{}/api/{}", origin, path)
@@ -716,14 +725,7 @@ pub async fn start_sync(
 
     // IMPORTANT: keep `base_url` as server ORIGIN (no /api and no /app).
     // Upload helpers already append `/api/sync/*`.
-    // Manual sync helper endpoints (scan/check/download) should also be called under `/api/sync/*`.
-    let base_url = {
-        let trimmed = base_url.trim_end_matches('/');
-        let trimmed = trimmed
-            .trim_end_matches("/app")
-            .trim_end_matches("/api");
-        trimmed.to_string()
-    };
+    let base_url = normalize_api_base(&base_url);
 
     let token = crate::common::store_utils::get_token(&app)
         .or_else(|| auth_state.0.lock().as_ref().and_then(|c| c.token.clone()));
@@ -1111,6 +1113,10 @@ pub async fn save_session_info(session_id: i32, user_id: i32, info: serde_json::
 pub async fn start_auto_sync(sys_session_id: i32, user_id: i32, wx_dir: String, base_url: String, token: Option<String>) -> Result<(), String> {
      let root = PathBuf::from(&wx_dir);
      if !root.exists() { return Err("本机未找到会话目录，无法开启自动同步".into()); }
+
+     // IMPORTANT: normalize to origin only (no /api or /app)
+     let base_url = normalize_api_base(&base_url);
+
      {
          let active = ACTIVE_AUTO_SESSIONS.lock();
          if active.contains(&sys_session_id) {
@@ -1119,7 +1125,7 @@ pub async fn start_auto_sync(sys_session_id: i32, user_id: i32, wx_dir: String, 
          }
      }
      let _ = stop_auto_sync(sys_session_id, user_id).await; // 保留原逻辑以防残留
-    tracing::info!(session_id = sys_session_id, user_id, %wx_dir, "start_auto_sync");
+     tracing::info!(session_id = sys_session_id, user_id, %wx_dir, "start_auto_sync");
      let cancel = Arc::new(AtomicBool::new(false));
      let handle = WatchHandle { cancel: cancel.clone() };
      WATCHERS.lock().insert(sys_session_id.to_string(), handle);

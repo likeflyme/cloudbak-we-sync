@@ -8,7 +8,8 @@ export const login = async (data: LoginModel) => {
     formData.append('username', data.username);
     formData.append('password', data.password);
     formData.append('captcha', '');
-    return fetch(endpoint + '/api/auth/token', {
+    const url = endpoint + '/api/auth/token';
+    return fetch(url, {
         method: 'POST',
         body: formData
     });

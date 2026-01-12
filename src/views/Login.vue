@@ -73,6 +73,7 @@ import type { FormInst, FormRules } from 'naive-ui'
 import { NCard, NForm, NFormItem, NInput, NButton, NAlert } from 'naive-ui'
 import { login as userLogin, me as fetchMe } from '@/api/auth'
 import { setTokenToStore, setEndpointToStore, setUserInfoToStore, getEndpointFromStore } from '@/common/store'
+// import { invoke } from '@tauri-apps/api/core'
 
 const router = useRouter()
 
@@ -131,6 +132,13 @@ const rules = computed<FormRules>(() => ({
 }))
 
 const login = async () => {
+  // const resp = await invoke('auth_test_login', {
+  //   endpoint: form.endpoint.trim(),
+  //   username: form.username,
+  //   password: form.password
+  // })
+  // console.log('auth_test_login response:', resp)
+
   error_msg.value = ''
   try {
     await formRef.value?.validate()
@@ -141,56 +149,88 @@ const login = async () => {
 
   is_loading.value = true
   login_btn_title.value = '登录中…'
-  try {
 
-    const payload = {
-      endpoint: form.endpoint.trim(),
-      username: form.username,
-      password: form.password
+  const payload = {
+    endpoint: form.endpoint.trim(),
+    username: form.username,
+    password: form.password
+  }
+
+  try {
+    const resp = await userLogin(payload)
+
+    const contentType = resp.headers.get('content-type') || ''
+    const isJson = contentType.toLowerCase().includes('application/json')
+
+    const readTextSafely = async () => {
+      try {
+        return await resp.text()
+      } catch {
+        return ''
+      }
     }
 
-    userLogin(payload).then(resp => {
-      if (resp.status === 200) {
-        resp.json().then(d => {
-          let token = d.token_type + " " + d.access_token;
-          // 通过 store 模块统一保存 token 与 endpoint
-          setTokenToStore(token).catch(() => {})
-          setEndpointToStore(payload.endpoint).catch(() => {})
-          console.log('登录成功，已保存 token 与 endpoint 到 store');
-          // fetch current user info
-          fetchMe(payload.endpoint, token).then(r => {
-            if (r.status === 200) {
-              r.json().then(info => {
-                if (info && (info.id !== undefined)) {
-                 // 保存用户信息到 store
-                  setUserInfoToStore(info).catch(() => {})
-                }
-                console.log('已保存用户信息到 store');
-                console.log('跳转首页');
-                router.push('/');
-              });
-            } else {
-              console.log('获取用户信息失败，跳转首页');
-              router.push('/');
-            }
-          }).catch(() => router.push('/'));
-        });
-      } else {
-        resp.json().then(d => {
-          error_msg.value = d.detail || '登录失败，请稍后重试';
-          closeLogin();
-        });
+    // Some backends may return empty body; avoid resp.json() throwing.
+    const safeJson = async () => {
+      if (!isJson) return null
+      const text = await readTextSafely()
+      if (!text) return null
+      try {
+        return JSON.parse(text)
+      } catch {
+        return null
       }
-    });
-  } catch (e: any) {
-    error_msg.value = e?.message || '登录失败，请稍后重试'
-    closeLogin();
-  }
-}
+    }
 
-const closeLogin = () => {
-  is_loading.value = false;
-  login_btn_title.value = '登 录'
+    if (resp.status === 200) {
+      const d: any = await safeJson()
+      if (!d?.access_token || !d?.token_type) {
+        throw new Error('登录接口返回格式异常（缺少 token）')
+      }
+
+      const token = `${d.token_type} ${d.access_token}`
+      await Promise.allSettled([setTokenToStore(token), setEndpointToStore(payload.endpoint)])
+
+      try {
+        const meResp = await fetchMe(payload.endpoint, token)
+        if (meResp.status === 200) {
+          const meCt = meResp.headers.get('content-type') || ''
+          const meText = await meResp.text()
+          const info =
+            meCt.toLowerCase().includes('application/json') && meText ? JSON.parse(meText) : null
+          if (info && info.id !== undefined) {
+            await Promise.allSettled([setUserInfoToStore(info)])
+          }
+        }
+      } catch {
+        // ignore, still go home
+      }
+
+      router.push('/')
+      return
+    }
+
+    // Non-200: show server message if possible
+    const errBody: any = await safeJson()
+    const detail = errBody?.detail || errBody?.message || errBody?.error
+
+    if (resp.status === 401) {
+      error_msg.value = detail || '账号或密码错误'
+    } else {
+      error_msg.value = detail ? `登录失败（${resp.status}）：${detail}` : `登录失败（${resp.status}）`
+    }
+  } catch (e: any) {
+    // Network error / CORS / DNS / refused / timeout etc.
+    const msg = (e?.message || '').toString()
+    if (msg) {
+      error_msg.value = `网络异常：${msg}`
+    } else {
+      error_msg.value = '网络异常：请求失败'
+    }
+  } finally {
+    is_loading.value = false
+    login_btn_title.value = '登 录'
+  }
 }
 </script>
 
@@ -239,23 +279,23 @@ const closeLogin = () => {
 .login-card {
   width: 100%;
   max-width: 420px;
-  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.06);
   border-radius: 12px;
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.08);
 }
 
 .actions {
   margin-top: 8px;
-}
-.actions :deep(.n-button) {
   width: 100%;
-}
 
-.mb-16 { margin-bottom: 16px; }
+  :deep(.n-button) {
+    width: 100%;
+  }
+}
 
 .footer {
-  margin-top: 16px;
-  color: #909399;
+  margin-top: 18px;
   font-size: 12px;
+  color: #999;
 }
 
 .footer .link {
@@ -265,9 +305,9 @@ const closeLogin = () => {
 
 .footer .sep {
   margin: 0 8px;
-  color: #c0c4cc;
 }
 
-/* 防止触控设备的弹性滚动产生视觉滚动条 */
-:host { overscroll-behavior: none; }
+.mb-16 {
+  margin-bottom: 16px;
+}
 </style>

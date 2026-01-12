@@ -31,5 +31,6 @@ pub fn all_handlers() -> impl Fn(tauri::ipc::Invoke) -> bool {
         auth::persist_auth,
         auth::load_persisted_auth,
         auth::clear_persisted_auth,
+        auth::auth_test_login,
     ]
 }

@@ -21,6 +21,14 @@ pub struct AuthInfo {
     pub base_url: String,
 }
 
+#[derive(Serialize)]
+pub struct AuthTestResponse {
+    pub url: String,
+    pub status: u16,
+    pub headers: Vec<(String, String)>,
+    pub body: String,
+}
+
 #[tauri::command]
 pub async fn set_auth_context(state: tauri::State<'_, AuthState>, user_id: i32, token: Option<String>, base_url: String) -> Result<(), String> {
     if base_url.trim().is_empty() { return Err("base_url 不能为空".into()); }
@@ -139,4 +147,48 @@ pub async fn clear_persisted_auth(state: tauri::State<'_, AuthState>, app: tauri
     state.0.lock().take();
     tracing::info!(store = STORE_NAME, "auth cleared");
     Ok(())
+}
+
+#[tauri::command]
+pub async fn auth_test_login(endpoint: String, username: String, password: String) -> Result<AuthTestResponse, String> {
+    fn normalize_endpoint(s: &str) -> String {
+        let s = s.trim();
+        let s = s.trim_end_matches('/');
+        // keep consistent with other normalization: if user pasted /api or /app, remove it
+        let s = s.trim_end_matches("/api").trim_end_matches("/app");
+        s.to_string()
+    }
+
+    let endpoint = normalize_endpoint(&endpoint);
+    let url = format!("{}/api/auth/token", endpoint);
+
+    let client = reqwest::Client::builder()
+        .danger_accept_invalid_certs(true)
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let mut form = std::collections::HashMap::new();
+    form.insert("username", username);
+    form.insert("password", password);
+    form.insert("captcha", "".to_string());
+
+    let resp = client
+        .post(&url)
+        .form(&form)
+        .send()
+        .await
+        .map_err(|e| format!("request failed: {e}"))?;
+
+    let status = resp.status().as_u16();
+    let mut headers: Vec<(String, String)> = Vec::new();
+    for (k, v) in resp.headers().iter() {
+        let val = v.to_str().unwrap_or("").to_string();
+        headers.push((k.as_str().to_string(), val));
+    }
+
+    let body = resp.text().await.unwrap_or_default();
+    let body = if body.len() > 4000 { body[..4000].to_string() } else { body };
+
+    Ok(AuthTestResponse { url, status, headers, body })
 }
