@@ -72,8 +72,6 @@ import { useRouter } from 'vue-router'
 import type { FormInst, FormRules } from 'naive-ui'
 import { NCard, NForm, NFormItem, NInput, NButton, NAlert } from 'naive-ui'
 import { login as userLogin, me as fetchMe } from '@/api/auth'
-import { invoke } from '@tauri-apps/api/core'
-import { saveToken } from '@/common/login'
 import { setTokenToStore, setEndpointToStore, setUserInfoToStore, getEndpointFromStore } from '@/common/store'
 
 const router = useRouter()

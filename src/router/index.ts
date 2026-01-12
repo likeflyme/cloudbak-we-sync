@@ -3,7 +3,6 @@ import Home from '../views/Home.vue'
 import Login from '../views/Login.vue'
 import SessionDetailPage from '@/views/session/SessionDetailPage.vue'
 import EmptyState from '@/components/SessionDetail/EmptyState.vue'
-import { isLogin } from '@/common/login'
 import { getTokenFromStore } from '@/common/store'
 
 const routes: Array<RouteRecordRaw> = [

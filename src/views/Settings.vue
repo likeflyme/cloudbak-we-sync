@@ -42,10 +42,12 @@ import { NCard, NSwitch, NTag, createDiscreteApi } from 'naive-ui'
 import { ref, onMounted } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { Store } from '@tauri-apps/plugin-store'
+import { appDataDir } from '@tauri-apps/api/path'
 
 const autoLaunch = ref(false)
 const wasAuto = ref(false)
 const localParse = ref(false)
+const appDataPath = ref('')
 const { message } = createDiscreteApi(['message'])
 
 const LOCAL_PARSE_KEY = 'local_parse_enabled'
@@ -79,7 +81,11 @@ const loadStatus = async () => {
   } catch (e) {
     console.warn('load local parse from store failed', e)
   }
-  appDataPath.value = await appDataDir()
+  try {
+    appDataPath.value = await appDataDir()
+  } catch {
+    appDataPath.value = ''
+  }
 }
 
 const onToggleAutoLaunch = async (val: boolean) => {
@@ -97,18 +103,19 @@ const onToggleAutoLaunch = async (val: boolean) => {
   }
 }
 
-const onToggleLocalParse = async (val: boolean) => {
-  try {
-    if (!settingsStore) await initStore()
-    await settingsStore?.set(LOCAL_PARSE_KEY, val)
-    await settingsStore?.save()
-    localParse.value = val
-    message.success(val ? '已开启本地解析' : '已关闭本地解析')
-  } catch (e) {
-    console.warn('toggle local parse failed', e)
-    message.error('操作失败')
-  }
-}
+// NOTE: local parse UI is currently commented out in template; keep handler commented to avoid unused warning.
+// const onToggleLocalParse = async (val: boolean) => {
+//   try {
+//     if (!settingsStore) await initStore()
+//     await settingsStore?.set(LOCAL_PARSE_KEY, val)
+//     await settingsStore?.save()
+//     localParse.value = val
+//     message.success(val ? '已开启本地解析' : '已关闭本地解析')
+//   } catch (e) {
+//     console.warn('toggle local parse failed', e)
+//     message.error('操作失败')
+//   }
+// }
 
 onMounted(loadStatus)
 </script>

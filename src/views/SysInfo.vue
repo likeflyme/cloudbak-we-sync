@@ -42,17 +42,11 @@
 </template>
 
 <script setup lang="ts">
-import { NCard, createDiscreteApi } from 'naive-ui'
+import { NCard } from 'naive-ui'
 import { ref, onMounted, computed } from 'vue'
 import { getVersion } from '@tauri-apps/api/app'
 import { getEndpointFromStore, getSysInfoFromStore } from '@/common/store'
 
-const autoLaunch = ref(false)
-const wasAuto = ref(false)
-const localParse = ref(false)
-const { message } = createDiscreteApi(['message'])
-
-// 从 store 加载，模板会自动解包 ref
 const endpoint = ref<string>('')
 
 const appVersion = ref<string>('未知')

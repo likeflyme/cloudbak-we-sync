@@ -84,8 +84,7 @@ import { removeToken } from '@/common/login'
 import { useRouter } from 'vue-router'
 import { getSessions, addSession } from '@/api/user'
 import { getSysInfo } from '@/api/sys'
-import { setSysInfoToStore, clearStoreExceptEndpoint, getUserInfoFromStore } from '@/common/store'
-import { token as getToken, endpoint } from '@/common/login'
+import { setSysInfoToStore, clearStoreExceptEndpoint } from '@/common/store'
 import { getVersion } from '@tauri-apps/api/app'
 // 临时类型声明避免 TS 报错（若 @tauri-apps/plugin-updater 未提供类型）
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
@@ -137,9 +136,7 @@ onMounted(async () => {
   } catch {}
 })
 
-// 计算客户端版本号（关于我们用软件版本号）
-const clientVersion = computed(() => appVersion.value)
-
+// 菜单选择处理
 const onMenuSelect = async (key: string) => {
   if (key === 'settings') {
     router.push({ name: 'Settings' })
@@ -160,8 +157,7 @@ const onMenuSelect = async (key: string) => {
   }
 }
 
-// 已移除首页更新检查逻辑
-
+// 选择会话
 const selectSession = (s: Session) => {
   selected.value = s
   newSessionData.value = null

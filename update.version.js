@@ -12,6 +12,22 @@ if (!newVersion) {
 const pkgPath = path.join(process.cwd(), "package.json");
 const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf-8"));
 pkg.version = newVersion;
+
+// Keep Tauri JS packages aligned (major/minor) with the Rust side used in src-tauri.
+// NOTE: These pins are required because tauri-cli enforces minor-version matching.
+if (pkg.dependencies) {
+  if (pkg.dependencies["@tauri-apps/api"])
+    pkg.dependencies["@tauri-apps/api"] = "^2.8.0";
+  if (pkg.dependencies["@tauri-apps/plugin-opener"])
+    pkg.dependencies["@tauri-apps/plugin-opener"] = "2.4.0";
+  if (pkg.dependencies["@tauri-apps/plugin-store"])
+    pkg.dependencies["@tauri-apps/plugin-store"] = "2.3.0";
+}
+if (pkg.devDependencies) {
+  if (pkg.devDependencies["@tauri-apps/cli"])
+    pkg.devDependencies["@tauri-apps/cli"] = "^2.8.0";
+}
+
 fs.writeFileSync(pkgPath, JSON.stringify(pkg, null, 2));
 
 // 2. src-tauri/tauri.conf.json
