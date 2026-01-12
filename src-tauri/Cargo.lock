@@ -5617,7 +5617,7 @@ dependencies = [
 
 [[package]]
 name = "we-sync"
-version = "1.0.3"
+version = "1.0.4"
 dependencies = [
  "aes",
  "anyhow",
