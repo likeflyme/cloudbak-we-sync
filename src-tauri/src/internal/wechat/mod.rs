@@ -25,15 +25,40 @@ fn choose_extractors(p: &WxPlatform) -> Vec<Box<dyn KeyExtractor>> {
   }
 }
 
-pub fn extract_any() -> Result<WechatKeys> {
+pub fn extract_db_keys(data_dir: Option<&str>) -> Result<WechatKeys> {
   let plat = detect_platform();
   for ext in choose_extractors(&plat) {
     if ext.detect()? {
-      match ext.extract() {
+      match ext.extract_db_keys(data_dir) {
         Ok(k) => return Ok(k),
-        Err(e) => { tracing::warn!(error = %e, "extractor failed, try next"); }
+        Err(e) => { tracing::warn!(error = %e, "extract_db_keys failed, try next"); }
       }
     }
   }
   Err(anyhow!("未找到可用的微信进程或提取器未实现"))
+}
+
+pub fn extract_img_keys(data_dir: Option<&str>) -> Result<WechatKeys> {
+  let plat = detect_platform();
+  for ext in choose_extractors(&plat) {
+    if ext.detect()? {
+      match ext.extract_img_keys(data_dir) {
+        Ok(k) => return Ok(k),
+        Err(e) => { tracing::warn!(error = %e, "extract_img_keys failed, try next"); }
+      }
+    }
+  }
+  Err(anyhow!("未找到可用的微信进程或提取器未实现"))
+}
+
+pub fn detect_data_dirs() -> Result<Vec<String>> {
+  let plat = detect_platform();
+  let mut all_dirs: Vec<String> = Vec::new();
+  for ext in choose_extractors(&plat) {
+    match ext.detect_data_dirs() {
+      Ok(dirs) => all_dirs.extend(dirs),
+      Err(e) => { tracing::warn!(error = %e, "detect_data_dirs failed for extractor, try next"); }
+    }
+  }
+  Ok(all_dirs)
 }

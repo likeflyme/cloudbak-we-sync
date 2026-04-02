@@ -5,9 +5,13 @@ export const load_avatar = async (path: string): Promise<string> => {
     const stripLongPathPrefix = path.replace(/^\\\\\?\\/, '');
     return invoke<string>('load_avatar', { path: stripLongPathPrefix })
 }
-// 提取微信数据
-export const extract_wechat_keys = (): Promise<any> => {
-    return invoke('extract_wechat_keys', { dataDir: null })
+// 提取微信数据库密钥
+export const extract_wechat_db_keys = (): Promise<any> => {
+    return invoke('extract_wechat_db_keys')
+}
+// 提取微信图片密钥
+export const extract_wechat_img_keys = (): Promise<any> => {
+    return invoke('extract_wechat_img_keys')
 }
 
 const stripLongPathPrefix = (p: string) => p.replace(/^\\\\\?\\/, '');

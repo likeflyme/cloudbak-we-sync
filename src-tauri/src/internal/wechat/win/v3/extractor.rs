@@ -188,15 +188,23 @@ impl WinV3Extractor {
 
 impl KeyExtractor for WinV3Extractor {
   fn detect(&self) -> Result<bool> { Ok(!winproc::find_wechat_v3_processes()?.is_empty()) }
-  fn extract(&self) -> Result<WechatKeys> {
+  fn extract_db_keys(&self, _data_dir: Option<&str>) -> Result<WechatKeys> {
     let procs = winproc::find_wechat_v3_processes()?; if procs.is_empty() { return Err(anyhow!("未找到微信 v3 进程")); }
     let selected = procs.into_iter().next().unwrap();
     let pid = selected.pid as u32;
     let (account_name, data_dir, data_key_hex) = Self::extract_data_key(pid)?;
     let full_version = selected.full_version.clone().unwrap_or_default();
     let client_version = full_version.split('.').next().map(|maj| if maj == "3" { "v3" } else { "unknown" }).unwrap_or("v3").to_string();
-    // v3 不再获取头像
     let avatar_base64 = None;
-    Ok(WechatKeys { ok: true, data_key: data_key_hex, image_key: None, xor_key: None, client_type: "win".into(), client_version, account_name, data_dir, method: Some("memory-v3".into()), pid: Some(pid), avatar_base64 })
+    Ok(WechatKeys { ok: true, data_key: data_key_hex, db_keys: vec![], image_key: None, xor_key: None, client_type: "win".into(), client_version, account_name, data_dir, method: Some("memory-v3".into()), pid: Some(pid), avatar_base64 })
+  }
+  fn extract_img_keys(&self, _data_dir: Option<&str>) -> Result<WechatKeys> {
+    // v3 不支持图片密钥提取
+    let procs = winproc::find_wechat_v3_processes()?; if procs.is_empty() { return Err(anyhow!("未找到微信 v3 进程")); }
+    let selected = procs.into_iter().next().unwrap();
+    let pid = selected.pid as u32;
+    let full_version = selected.full_version.clone().unwrap_or_default();
+    let client_version = full_version.split('.').next().map(|maj| if maj == "3" { "v3" } else { "unknown" }).unwrap_or("v3").to_string();
+    Ok(WechatKeys { ok: true, data_key: None, db_keys: vec![], image_key: None, xor_key: None, client_type: "win".into(), client_version, account_name: None, data_dir: None, method: Some("memory-v3".into()), pid: Some(pid), avatar_base64: None })
   }
 }

@@ -20,12 +20,25 @@ pub async fn cancel_extract_wechat_keys() -> Result<(), String> {
 
 #[tauri::command]
 #[cfg(target_os = "windows")]
-pub async fn extract_wechat_keys(data_dir: Option<String>) -> Result<serde_json::Value, String> {
+pub async fn extract_wechat_db_keys(data_dir: Option<String>) -> Result<serde_json::Value, String> {
     use crate::internal::wechat;
     // reset cancel flag at start
     EXTRACT_CANCEL_FLAG.store(false, Ordering::Relaxed);
-    tracing::info!(?data_dir, "extract_wechat_keys invoked (unified)");
-    match wechat::extract_any() {
+    tracing::info!(?data_dir, "extract_wechat_db_keys invoked");
+    match wechat::extract_db_keys(data_dir.as_deref()) {
+        Ok(keys) => Ok(keys.to_json()),
+        Err(e) => Ok(crate::internal::wechat::common::types::WechatKeys::fail(&e.to_string()))
+    }
+}
+
+#[tauri::command]
+#[cfg(target_os = "windows")]
+pub async fn extract_wechat_img_keys(data_dir: Option<String>) -> Result<serde_json::Value, String> {
+    use crate::internal::wechat;
+    // reset cancel flag at start
+    EXTRACT_CANCEL_FLAG.store(false, Ordering::Relaxed);
+    tracing::info!(?data_dir, "extract_wechat_img_keys invoked");
+    match wechat::extract_img_keys(data_dir.as_deref()) {
         Ok(keys) => Ok(keys.to_json()),
         Err(e) => Ok(crate::internal::wechat::common::types::WechatKeys::fail(&e.to_string()))
     }
@@ -92,8 +105,31 @@ pub async fn extract_wechat_v3_avatar(wx_id: String, data_dir: String) -> Result
 // 非Windows不支持
 #[tauri::command]
 #[cfg(not(target_os = "windows"))]
-pub async fn extract_wechat_keys(_data_dir: Option<String>) -> Result<serde_json::Value, String> {
+pub async fn extract_wechat_db_keys(_data_dir: Option<String>) -> Result<serde_json::Value, String> {
     Ok(serde_json::json!({ "ok": false, "error": "Windows only" }))
+}
+
+#[tauri::command]
+#[cfg(not(target_os = "windows"))]
+pub async fn extract_wechat_img_keys(_data_dir: Option<String>) -> Result<serde_json::Value, String> {
+    Ok(serde_json::json!({ "ok": false, "error": "Windows only" }))
+}
+
+#[tauri::command]
+#[cfg(target_os = "windows")]
+pub async fn detect_data_dirs() -> Result<serde_json::Value, String> {
+    use crate::internal::wechat;
+    tracing::info!("detect_data_dirs invoked");
+    match wechat::detect_data_dirs() {
+        Ok(dirs) => Ok(serde_json::json!({ "ok": true, "dirs": dirs })),
+        Err(e) => Ok(serde_json::json!({ "ok": false, "error": e.to_string(), "dirs": [] })),
+    }
+}
+
+#[tauri::command]
+#[cfg(not(target_os = "windows"))]
+pub async fn detect_data_dirs() -> Result<serde_json::Value, String> {
+    Ok(serde_json::json!({ "ok": false, "error": "Windows only", "dirs": [] }))
 }
 
 #[tauri::command]

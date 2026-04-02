@@ -4,6 +4,7 @@ use serde::Serialize;
 pub struct WechatKeys {
   pub ok: bool,
   pub data_key: Option<String>,
+  pub db_keys: Vec<String>,       // 数据库密钥列表（从进程内存扫描 x'...' 模式得到）
   pub image_key: Option<String>,
   pub xor_key: Option<String>,
   pub client_type: String,      // win | mac
@@ -21,6 +22,7 @@ impl WechatKeys {
     serde_json::json!({
       "ok": self.ok,
       "dataKey": self.data_key,
+      "dbKeys": self.db_keys,
       "imageKey": self.image_key,
       "xorKey": self.xor_key,
       "clientType": self.client_type,

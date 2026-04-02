@@ -81,13 +81,21 @@
               <div class="section-title">密钥信息</div>
               <div class="grid one">
                 <n-form-item label="Data Key" path="wx_key">
-                  <n-input v-model:value="editable.wx_key" placeholder="数据密钥（hex）" />
+                  <n-select
+                    v-if="keyOptions.length > 0"
+                    v-model:value="editable.wx_key"
+                    :options="keyOptions"
+                    filterable
+                    tag
+                    placeholder="选择或输入数据密钥（hex）"
+                  />
+                  <n-input v-else v-model:value="editable.wx_key" placeholder="数据密钥（hex）" />
                 </n-form-item>
                 <n-form-item label="AES Key" path="aes_key">
-                  <n-input v-model:value="editable.aes_key" placeholder="图片密钥（hex）" />
+                  <n-input v-model:value="editable.aes_key" placeholder="图片密钥（hex，可选）" />
                 </n-form-item>
                 <n-form-item label="XOR Key" path="xor_key">
-                  <n-input v-model:value="editable.xor_key" placeholder="XOR密钥（hex）" />
+                  <n-input v-model:value="editable.xor_key" placeholder="XOR密钥（hex，可选）" />
                 </n-form-item>
               </div>
             </div>
@@ -143,6 +151,7 @@ const defaults: PartialSession = {
   wx_key: '',
   aes_key: '',
   xor_key: '',
+  keys: [],
   autoSync: false,
   syncFilters: '',
   client_type: '',
@@ -159,6 +168,15 @@ const clientVersionOptions = [
   { label: 'v4', value: 'v4' },
   { label: 'v3', value: 'v3' }
 ]
+
+/** Build select options from the keys array passed in via sessionData */
+const keyOptions = computed(() => {
+  const keys: string[] = (editable.keys as string[]) || []
+  return keys.map((k, i) => ({
+    label: k.length > 16 ? `key[${i}]: ${k.slice(0, 16)}...` : `key[${i}]: ${k}`,
+    value: k
+  }))
+})
 
 const formRef = ref<FormInst | null>(null)
 const rules: FormRules = {
@@ -181,19 +199,13 @@ const rules: FormRules = {
     { required: true, validator: (_r, v: string) => !!(v && v.trim().length) || new Error('客户端版本不能为空'), trigger: ['input','blur'] }
   ],
   wx_key: [
-    { required: true, validator: (_r, v: string) => !!(v && v.trim().length) || new Error('Data Key 不能为空'), trigger: ['input','blur'] }
+    { required: false, trigger: ['input','blur'] }
   ],
   aes_key: [
-    { required: false, validator: (_r, v: string) => {
-        if (editable.client_version === 'v3') { return true; }
-        return !!(v && v.trim().length) || new Error('AES Key 不能为空');
-      }, trigger: ['input','blur'] }
+    { required: false, trigger: ['input','blur'] }
   ],
   xor_key: [
-    { required: false, validator: (_r, v: string) => {
-        if (editable.client_version === 'v3') { return true; }
-        return !!(v && v.trim().length) || new Error('XOR Key 不能为空');
-      }, trigger: ['input','blur'] }
+    { required: false, trigger: ['input','blur'] }
   ]
 }
 

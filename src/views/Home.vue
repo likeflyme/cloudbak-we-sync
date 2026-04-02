@@ -51,10 +51,7 @@
       <n-layout-content class="main-content">
         <!-- 调整：取消按钮放到加载组件内部文字下方，用 a 样式 -->
         <div v-if="isAddingSession" class="extracting-wrap">
-          <LoadingState />
-          <div class="cancel-inline">
-            <a href="javascript:" class="cancel-link" @click="cancelExtraction" v-if="canCancel">取消</a>
-          </div>
+          <LoadingState :message="loadingMessage" :logs="extractionLogs" :can-cancel="canCancel" @cancel="cancelExtraction" />
         </div>
         <NewSessionPreview 
           v-else-if="newSessionData" 
@@ -73,12 +70,39 @@
         <p><strong>社区论坛：</strong><a href="https://forum.cloudbak.org.cn" target="_blank">https://forum.cloudbak.org.cn</a></p>
       </div>
     </n-modal>
+
+    <!-- 数据目录选择弹窗 -->
+    <n-modal v-model:show="showDirDialog" preset="card" title="选择微信数据目录" style="max-width:520px;" :mask-closable="false">
+      <div style="font-size:14px; line-height:1.8;">
+        <template v-if="detectedDirs.length > 0">
+          <p style="margin-bottom:8px; color:#666;">检测到以下微信数据目录，请选择一个：</p>
+          <n-radio-group v-model:value="selectedDir">
+            <n-space vertical>
+              <n-radio v-for="dir in detectedDirs" :key="dir" :value="dir" :label="dir" />
+            </n-space>
+          </n-radio-group>
+        </template>
+        <template v-else>
+          <p style="margin-bottom:8px; color:#999;">未检测到微信数据目录，请手动输入路径：</p>
+          <n-input v-model:value="manualDir" placeholder="例如：D:\xwechat_files\wxid_xxx\db_storage" clearable />
+        </template>
+      </div>
+      <template #footer>
+        <n-space justify="end">
+          <n-button @click="onDirDialogCancel">取消</n-button>
+          <n-button type="primary" @click="onDirDialogConfirm"
+            :disabled="detectedDirs.length > 0 ? !selectedDir : !manualDir.trim()">
+            确定
+          </n-button>
+        </n-space>
+      </template>
+    </n-modal>
   </n-layout>
 </template>
 
 <script setup lang="ts">
 import { ref, provide, computed, onMounted } from 'vue'
-import { NLayout, NLayoutContent, NLayoutHeader, NButton, NIcon, NDropdown, NModal } from 'naive-ui'
+import { NLayout, NLayoutContent, NLayoutHeader, NButton, NIcon, NDropdown, NModal, NInput, NRadioGroup, NRadio, NSpace } from 'naive-ui'
 import { invoke } from '@tauri-apps/api/core'
 import { removeToken } from '@/common/login'
 import { useRouter } from 'vue-router'
@@ -96,6 +120,7 @@ import { listen } from '@tauri-apps/api/event'
 import SessionSidebar from '@/components/Session/SessionSidebar.vue'
 import NewSessionPreview from '@/components/SessionDetail/NewSessionPreview.vue'
 import LoadingState from '@/components/SessionDetail/LoadingState.vue'
+import type { LogEntry } from '@/components/SessionDetail/LoadingState.vue'
 import type { Session, PartialSession } from '@/models/session'
 
 const router = useRouter()
@@ -110,6 +135,29 @@ const canCancel = computed(() => isAddingSession.value && !extractionCancelled.v
 const newSessionData = ref<PartialSession | null>(null)
 const showAboutDialog = ref(false)
 const appVersion = ref<string>('未知')
+
+// 日志与加载消息
+const loadingMessage = ref('正在扫描微信数据...')
+const extractionLogs = ref<LogEntry[]>([])
+
+const appendLog = (text: string, level: LogEntry['level'] = 'info') => {
+  const now = new Date()
+  const time = [now.getHours(), now.getMinutes(), now.getSeconds()]
+    .map(n => String(n).padStart(2, '0')).join(':')
+  extractionLogs.value.push({ time, text, level })
+}
+
+const resetLogs = () => {
+  extractionLogs.value = []
+  loadingMessage.value = '正在扫描微信数据...'
+}
+
+// 数据目录选择对话框
+const showDirDialog = ref(false)
+const detectedDirs = ref<string[]>([])
+const selectedDir = ref<string>('')
+const manualDir = ref<string>('')
+let dirDialogResolve: ((dir: string | null) => void) | null = null
 
 const menuOptions = [
   { label: '系统信息', key: 'sysInfo' },
@@ -168,6 +216,28 @@ const selectSession = (s: Session) => {
 const getSessionById = (id: number) => sessions.value.find(s => s.id === id) || null
 provide('getSessionById', getSessionById)
 
+// 数据目录选择对话框回调
+const onDirDialogCancel = () => {
+  showDirDialog.value = false
+  if (dirDialogResolve) { dirDialogResolve(null); dirDialogResolve = null }
+}
+const onDirDialogConfirm = () => {
+  showDirDialog.value = false
+  const dir = detectedDirs.value.length > 0 ? selectedDir.value : manualDir.value.trim()
+  if (dirDialogResolve) { dirDialogResolve(dir || null); dirDialogResolve = null }
+}
+
+/** 弹出目录选择对话框，返回用户选择的目录或 null（取消） */
+const promptDirSelection = (dirs: string[]): Promise<string | null> => {
+  return new Promise((resolve) => {
+    detectedDirs.value = dirs
+    selectedDir.value = dirs.length > 0 ? dirs[0] : ''
+    manualDir.value = ''
+    dirDialogResolve = resolve
+    showDirDialog.value = true
+  })
+}
+
 // 显示添加对话框 -> 确认后调用后端提取并创建会话
 const showAddDialog = async () => {
   selected.value = null
@@ -178,11 +248,95 @@ const showAddDialog = async () => {
   isAddingSession.value = true
   extractionCancelled.value = false
   newSessionData.value = null
+  resetLogs()
   try {
-    const res: any = await invoke('extract_wechat_keys', { dataDir: null })
-    if (extractionCancelled.value) { return } // 用户已取消，不再处理结果
+    // 第零步：检测微信数据目录
+    loadingMessage.value = '正在检测微信数据目录...'
+    appendLog('开始检测微信数据目录...')
+    const dirRes: any = await invoke('detect_data_dirs')
+    if (extractionCancelled.value) { appendLog('用户已取消', 'warn'); return }
+    const dirs: string[] = (dirRes?.ok && Array.isArray(dirRes.dirs)) ? dirRes.dirs : []
+
+    if (dirs.length > 0) {
+      appendLog(`检测到 ${dirs.length} 个数据目录：`, 'success')
+      dirs.forEach((d, i) => appendLog(`  [${i + 1}] ${d}`))
+    } else {
+      appendLog('未检测到微信数据目录', 'warn')
+    }
+
+    let chosenDir: string | null = null
+    if (dirs.length === 1) {
+      // 只有一个目录，直接使用
+      chosenDir = dirs[0]
+      appendLog(`自动选择唯一目录: ${chosenDir}`, 'info')
+    } else {
+      // 多个或零个，弹窗让用户选择或输入
+      isAddingSession.value = false // 暂时隐藏 loading，显示弹窗
+      chosenDir = await promptDirSelection(dirs)
+      if (!chosenDir || extractionCancelled.value) {
+        // 用户取消了
+        appendLog('用户取消了目录选择', 'warn')
+        isAddingSession.value = false
+        return
+      }
+      isAddingSession.value = true // 恢复 loading
+      appendLog(`用户选择目录: ${chosenDir}`, 'info')
+    }
+
+    if (extractionCancelled.value) { appendLog('用户已取消', 'warn'); return }
+
+    // 第一步：提取数据库密钥
+    loadingMessage.value = '正在提取数据库密钥...'
+    appendLog('开始提取数据库密钥...')
+    const dbRes: any = await invoke('extract_wechat_db_keys', { dataDir: chosenDir })
+    if (extractionCancelled.value) { appendLog('用户已取消', 'warn'); return }
+    if (!dbRes?.ok) {
+      const errMsg = dbRes?.error || '提取数据库密钥失败'
+      appendLog(`数据库密钥提取失败: ${errMsg}`, 'error')
+      if (!extractionCancelled.value) { alert(errMsg) }
+      return
+    }
+
+    // 记录数据库密钥信息
+    const dbKeys: string[] = dbRes.dbKeys || []
+    appendLog(`数据库密钥提取成功，共 ${dbKeys.length} 个密钥`, 'success')
+    if (dbKeys.length > 0) {
+      dbKeys.forEach((k: string, i: number) => {
+        // 只显示前8字符以保护隐私
+        const masked = k.length > 8 ? k.slice(0, 8) + '...' : k
+        appendLog(`  db_key[${i}]: ${masked}`)
+      })
+    }
+    if (dbRes.dataDir) { appendLog(`数据目录: ${dbRes.dataDir}`) }
+    if (dbRes.clientType) { appendLog(`客户端类型: ${dbRes.clientType}`) }
+    if (dbRes.clientVersion) { appendLog(`客户端版本: ${dbRes.clientVersion}`) }
+
+    // 第二步：提取图片密钥
+    // loadingMessage.value = '正在提取图片密钥...'
+    // appendLog('开始提取图片密钥...')
+    // let imageKey = ''
+    // let xorKey = ''
+    // if (!extractionCancelled.value) {
+    //   const imgRes: any = await invoke('extract_wechat_img_keys', { dataDir: chosenDir })
+    //   if (extractionCancelled.value) { appendLog('用户已取消', 'warn'); return }
+    //   if (imgRes?.ok) {
+    //     imageKey = imgRes.imageKey || ''
+    //     xorKey = imgRes.xorKey != null ? String(imgRes.xorKey) : ''
+    //     appendLog('图片密钥提取成功', 'success')
+    //     if (imageKey) {
+    //       const maskedImg = imageKey.length > 8 ? imageKey.slice(0, 8) + '...' : imageKey
+    //       appendLog(`  image_key: ${maskedImg}`)
+    //     }
+    //     if (xorKey) { appendLog(`  xor_key: ${xorKey}`) }
+    //   } else {
+    //     appendLog(`图片密钥提取失败: ${imgRes?.error || '未知原因'}（不影响主流程）`, 'warn')
+    //   }
+    // }
+
+    const res = dbRes
     if (res?.ok) {
-      let dataDir = res.dataDir as string | null
+      // 优先使用用户选择的数据目录，其次使用后端返回的
+      let dataDir = chosenDir || (res.dataDir as string | null)
       if (dataDir && dataDir.startsWith('\\\\?\\')) {
         dataDir = dataDir.slice(4)
       }
@@ -201,9 +355,10 @@ const showAddDialog = async () => {
         wx_email: '',
         wx_dir: dataDir || '',
         avatar: '',
-        wx_key: res.dataKey || '',
-        aes_key: res.imageKey || '',
-        xor_key: res.xorKey != null ? String(res.xorKey) : '',
+        wx_key: '',
+        keys: res.dbKeys || [],
+        aes_key: '',
+        xor_key: '',
         client_type: clientType,
         client_version: clientVersion,
         // legacy aliases for compatibility
@@ -213,29 +368,37 @@ const showAddDialog = async () => {
 
       // 如果后端提供了本地头像路径，解析为可用的 data/url
       if (res.headImg) {
+        appendLog('正在加载头像...')
         try {
           const avatarData: string = await invoke('load_avatar', { path: res.headImg })
-          if (extractionCancelled.value) { return } // 用户已取消，不再处理结果
+          if (extractionCancelled.value) { appendLog('用户已取消', 'warn'); return }
           if (avatarData) {
             draft.avatar = avatarData
+            appendLog('头像加载成功', 'success')
           }
         } catch (e) {
-          console.warn('load_avatar 调用失败:', e)
+          appendLog(`头像加载失败: ${e}`, 'warn')
         }
       }
 
+      appendLog('全部提取完成 ✓', 'success')
       if (!extractionCancelled.value) { newSessionData.value = draft }
     } else {
-      if (!extractionCancelled.value) { alert(res?.error || '提取失败，未返回可用数据') }
+      const errMsg = res?.error || '提取失败，未返回可用数据'
+      appendLog(`提取失败: ${errMsg}`, 'error')
+      if (!extractionCancelled.value) { alert(errMsg) }
     }
   } catch (e: any) {
-    if (!extractionCancelled.value) { alert(`调用失败: ${e?.message || String(e)}`) }
+    const errMsg = e?.message || String(e)
+    appendLog(`调用异常: ${errMsg}`, 'error')
+    if (!extractionCancelled.value) { alert(`调用失败: ${errMsg}`) }
   } finally {
     if (!extractionCancelled.value) { isAddingSession.value = false }
   }
 }
 
 const cancelExtraction = () => {
+  appendLog('用户取消了提取操作', 'warn')
   extractionCancelled.value = true
   isAddingSession.value = false
   newSessionData.value = null
@@ -406,8 +569,5 @@ loadSessions()
 .update-panel .notes { background: #f8f8f8; padding: 8px; white-space: pre-wrap; font-size: 12px; border-radius: 4px; }
 .update-panel .actions { display: flex; gap: 8px; margin-top: 8px; }
 
-.cancel-inline { text-align: center; margin-top: -320px; /* roughly position below spin description */ }
-.cancel-link { display: inline-block; margin-top: 12px; font-size: 13px; color: #409eff; text-decoration: underline; cursor: pointer; }
-.cancel-link:hover { color: #66b1ff; }
 .extracting-wrap { position: relative; }
 </style>

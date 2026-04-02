@@ -8,8 +8,10 @@ use tauri::generate_handler;
 
 pub fn all_handlers() -> impl Fn(tauri::ipc::Invoke) -> bool {
     generate_handler![
-        wechat::extract_wechat_keys,
+        wechat::extract_wechat_db_keys,
+        wechat::extract_wechat_img_keys,
         wechat::cancel_extract_wechat_keys,
+        wechat::detect_data_dirs,
         wechat::load_avatar,
         sync::start_sync,
         sync::stop_sync,

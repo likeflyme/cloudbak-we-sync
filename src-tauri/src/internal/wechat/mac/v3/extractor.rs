@@ -6,5 +6,6 @@ pub struct MacV3Extractor;
 
 impl KeyExtractor for MacV3Extractor {
   fn detect(&self) -> Result<bool> { Ok(false) } // 占位
-  fn extract(&self) -> Result<WechatKeys> { Err(anyhow!("mac v3 提取未实现")) }
+  fn extract_db_keys(&self, data_dir: Option<&str>) -> Result<WechatKeys> { Err(anyhow!("mac v3 数据库密钥提取未实现")) }
+  fn extract_img_keys(&self, data_dir: Option<&str>) -> Result<WechatKeys> { Err(anyhow!("mac v3 图片密钥提取未实现")) }
 }
