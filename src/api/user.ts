@@ -1,4 +1,4 @@
-import { ftget, ftpost, ftdelete } from "./api";
+import { ftget, ftpost, ftdelete, ftput } from "./api";
 import { PartialSession } from "@/models/session";
 
 
@@ -46,4 +46,12 @@ export const addSession = (sysSession: PartialSession) => {
 
 export const deleteSession = (sessionId: number) => {
     return ftdelete(`/api/user/sys-session/${sessionId}`);
+}
+
+export const updateSessionImgKey = (sessionId: number, aesKey: string, xorKey: number) => {
+    return ftput('/api/user/update-session-img-key', {
+        session_id: sessionId,
+        aes_key: aesKey,
+        xor_key: xorKey,
+    });
 }

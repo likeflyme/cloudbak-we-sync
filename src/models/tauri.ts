@@ -10,8 +10,8 @@ export const extract_wechat_db_keys = (): Promise<any> => {
     return invoke('extract_wechat_db_keys')
 }
 // 提取微信图片密钥
-export const extract_wechat_img_keys = (): Promise<any> => {
-    return invoke('extract_wechat_img_keys')
+export const extract_wechat_img_keys = (dataDir?: string | null): Promise<any> => {
+    return invoke('extract_wechat_img_keys', { dataDir: dataDir ?? null })
 }
 
 const stripLongPathPrefix = (p: string) => p.replace(/^\\\\\?\\/, '');

@@ -28,11 +28,16 @@ fn choose_extractors(p: &WxPlatform) -> Vec<Box<dyn KeyExtractor>> {
 pub fn extract_db_keys(data_dir: Option<&str>) -> Result<WechatKeys> {
   let plat = detect_platform();
   for ext in choose_extractors(&plat) {
-    if ext.detect()? {
-      match ext.extract_db_keys(data_dir) {
-        Ok(k) => return Ok(k),
-        Err(e) => { tracing::warn!(error = %e, "extract_db_keys failed, try next"); }
+    match ext.detect() {
+      Ok(true) => {
+        tracing::info!("extractor detect=true, trying extract_db_keys");
+        match ext.extract_db_keys(data_dir) {
+          Ok(k) => return Ok(k),
+          Err(e) => { tracing::warn!(error = %e, "extract_db_keys failed, try next"); }
+        }
       }
+      Ok(false) => { tracing::debug!("extractor detect=false, skip"); }
+      Err(e) => { tracing::warn!(error = %e, "extractor detect() error, skip to next"); }
     }
   }
   Err(anyhow!("未找到可用的微信进程或提取器未实现"))
@@ -41,11 +46,16 @@ pub fn extract_db_keys(data_dir: Option<&str>) -> Result<WechatKeys> {
 pub fn extract_img_keys(data_dir: Option<&str>) -> Result<WechatKeys> {
   let plat = detect_platform();
   for ext in choose_extractors(&plat) {
-    if ext.detect()? {
-      match ext.extract_img_keys(data_dir) {
-        Ok(k) => return Ok(k),
-        Err(e) => { tracing::warn!(error = %e, "extract_img_keys failed, try next"); }
+    match ext.detect() {
+      Ok(true) => {
+        tracing::info!("extractor detect=true, trying extract_img_keys");
+        match ext.extract_img_keys(data_dir) {
+          Ok(k) => return Ok(k),
+          Err(e) => { tracing::warn!(error = %e, "extract_img_keys failed, try next"); }
+        }
       }
+      Ok(false) => { tracing::debug!("extractor detect=false, skip"); }
+      Err(e) => { tracing::warn!(error = %e, "extractor detect() error, skip to next"); }
     }
   }
   Err(anyhow!("未找到可用的微信进程或提取器未实现"))

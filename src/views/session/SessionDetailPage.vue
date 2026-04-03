@@ -13,6 +13,7 @@
           @toggle-key-visibility="toggleKeyVisibility"
           @copy-key="copyKey"
           @update:syncFilters="updateSyncFilters"
+          @update-img-keys="handleUpdateImgKeys"
           @sync="handleSync"
           @delete="deleteSession"
         />
@@ -57,7 +58,7 @@ import LoadingState from '@/components/SessionDetail/LoadingState.vue'
 import EmptyState from '@/components/SessionDetail/EmptyState.vue'
 import SessionDetail from '@/views/session/SessionDetail.vue'
 import type { Session } from '@/models/session'
-import { deleteSession as deleteSessionFromServer } from '@/api/user'
+import { deleteSession as deleteSessionFromServer, updateSessionImgKey } from '@/api/user'
 import { invoke } from '@tauri-apps/api/core'
 import { endpoint, token as getToken } from '@/common/login'
 import { decrypt } from '@/api/task' // 新增: 同步完成后调用解密任务
@@ -262,6 +263,30 @@ const toggleKeyVisibility = (key: 'data_key' | 'aes_key' | 'xor_key') => {
 const updateSyncFilters = (value: string) => {
   if (!value || !session.value) return
   session.value.syncFilters = value
+}
+
+const handleUpdateImgKeys = async (payload: { aes_key: string; xor_key: string }) => {
+  if (!session.value) return
+  session.value.aes_key = payload.aes_key
+  session.value.xor_key = payload.xor_key
+
+  // 调用后端 API 持久化图片密钥
+  try {
+    const xorKeyNum = payload.xor_key ? parseInt(payload.xor_key, 10) : 0
+    await updateSessionImgKey(session.value.id, payload.aes_key, Number.isFinite(xorKeyNum) ? xorKeyNum : 0)
+    message.success('图片密钥已更新并保存到服务端')
+  } catch (e: any) {
+    console.warn('更新服务端图片密钥失败:', e)
+    message.warning('图片密钥已提取，但保存到服务端失败: ' + (e?.message || String(e)))
+  }
+
+  // 本地持久化
+  try {
+    const { id, name, desc, wx_id, wx_acct_name, wx_mobile, wx_email, wx_dir, avatar, online, lastActive, wx_key, aes_key, xor_key, client_type, client_version } = session.value
+    await invoke('save_session_info', { sessionId: id, userId, info: { id, name, desc, wx_id, wx_acct_name, wx_mobile, wx_email, wx_dir, avatar, online, lastActive, wx_key, aes_key, xor_key, client_type, client_version } })
+  } catch (e) {
+    console.warn('持久化 session info 失败:', e)
+  }
 }
 
 const MIN_SERVER_VERSION = '2.0.7'

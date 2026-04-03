@@ -311,27 +311,7 @@ const showAddDialog = async () => {
     if (dbRes.clientType) { appendLog(`客户端类型: ${dbRes.clientType}`) }
     if (dbRes.clientVersion) { appendLog(`客户端版本: ${dbRes.clientVersion}`) }
 
-    // 第二步：提取图片密钥
-    // loadingMessage.value = '正在提取图片密钥...'
-    // appendLog('开始提取图片密钥...')
-    // let imageKey = ''
-    // let xorKey = ''
-    // if (!extractionCancelled.value) {
-    //   const imgRes: any = await invoke('extract_wechat_img_keys', { dataDir: chosenDir })
-    //   if (extractionCancelled.value) { appendLog('用户已取消', 'warn'); return }
-    //   if (imgRes?.ok) {
-    //     imageKey = imgRes.imageKey || ''
-    //     xorKey = imgRes.xorKey != null ? String(imgRes.xorKey) : ''
-    //     appendLog('图片密钥提取成功', 'success')
-    //     if (imageKey) {
-    //       const maskedImg = imageKey.length > 8 ? imageKey.slice(0, 8) + '...' : imageKey
-    //       appendLog(`  image_key: ${maskedImg}`)
-    //     }
-    //     if (xorKey) { appendLog(`  xor_key: ${xorKey}`) }
-    //   } else {
-    //     appendLog(`图片密钥提取失败: ${imgRes?.error || '未知原因'}（不影响主流程）`, 'warn')
-    //   }
-    // }
+    // 图片密钥提取已移至 KeyInfoCard 组件中按需触发
 
     const res = dbRes
     if (res?.ok) {

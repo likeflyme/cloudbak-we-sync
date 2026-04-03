@@ -84,4 +84,5 @@ tauri-plugin-autostart = "2"
 yara = { version = "0.29", features = ["yara-static", "vendored"] }
 regex = "1.11"
 encoding_rs = "0.8"
+tokio = { version = "1", features = ["rt"] }
 

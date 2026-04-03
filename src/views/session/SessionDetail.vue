@@ -14,6 +14,7 @@
         :key-visibility="keyVisibility"
         @toggle-key-visibility="$emit('toggle-key-visibility', $event)"
         @copy-key="$emit('copy-key', $event)"
+        @update-img-keys="$emit('update-img-keys', $event)"
       />
     </div>
 
@@ -71,6 +72,7 @@ const emit = defineEmits<{
   (e: 'toggle-key-visibility', key: 'data_key' | 'aes_key' | 'xor_key'): void
   (e: 'copy-key', key: string): void
   (e: 'update:syncFilters', value: string): void
+  (e: 'update-img-keys', payload: { aes_key: string; xor_key: string }): void
   (e: 'sync', key: string): void
   (e: 'delete'): void
 }>()

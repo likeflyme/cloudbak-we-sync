@@ -25,7 +25,10 @@ pub async fn extract_wechat_db_keys(data_dir: Option<String>) -> Result<serde_js
     // reset cancel flag at start
     EXTRACT_CANCEL_FLAG.store(false, Ordering::Relaxed);
     tracing::info!(?data_dir, "extract_wechat_db_keys invoked");
-    match wechat::extract_db_keys(data_dir.as_deref()) {
+    let result = tokio::task::spawn_blocking(move || {
+        wechat::extract_db_keys(data_dir.as_deref())
+    }).await.map_err(|e| format!("task join error: {}", e))?;
+    match result {
         Ok(keys) => Ok(keys.to_json()),
         Err(e) => Ok(crate::internal::wechat::common::types::WechatKeys::fail(&e.to_string()))
     }
@@ -38,9 +41,22 @@ pub async fn extract_wechat_img_keys(data_dir: Option<String>) -> Result<serde_j
     // reset cancel flag at start
     EXTRACT_CANCEL_FLAG.store(false, Ordering::Relaxed);
     tracing::info!(?data_dir, "extract_wechat_img_keys invoked");
-    match wechat::extract_img_keys(data_dir.as_deref()) {
-        Ok(keys) => Ok(keys.to_json()),
-        Err(e) => Ok(crate::internal::wechat::common::types::WechatKeys::fail(&e.to_string()))
+    let result = tokio::task::spawn_blocking(move || {
+        tracing::info!("extract_wechat_img_keys: spawn_blocking started");
+        let r = wechat::extract_img_keys(data_dir.as_deref());
+        tracing::info!(?r, "extract_wechat_img_keys: spawn_blocking result");
+        r
+    }).await.map_err(|e| format!("task join error: {}", e))?;
+    match result {
+        Ok(keys) => {
+            let json = keys.to_json();
+            tracing::info!(?json, "extract_wechat_img_keys: returning ok");
+            Ok(json)
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "extract_wechat_img_keys: returning error");
+            Ok(crate::internal::wechat::common::types::WechatKeys::fail(&e.to_string()))
+        }
     }
 }
 

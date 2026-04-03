@@ -42,5 +42,7 @@ export const ftget = (url: string, options: FtOptions = {}) =>
   ft(url, { ...options, method: "GET" });
 export const ftpost = (url: string, body: any = {}, options: FtOptions = {}) =>
   ft(url, { ...options, method: "POST", body: JSON.stringify(body) });
+export const ftput = (url: string, body: any = {}, options: FtOptions = {}) =>
+  ft(url, { ...options, method: "PUT", body: JSON.stringify(body) });
 export const ftdelete = (url: string, options: FtOptions = {}) =>
   ft(url, { ...options, method: "DELETE" });

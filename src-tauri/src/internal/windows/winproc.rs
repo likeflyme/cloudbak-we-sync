@@ -13,7 +13,12 @@ pub struct WeChatProcess {
     pub full_version: Option<String>,
 }
 
-fn strip_exe(name: &str) -> &str { name.strip_suffix(".exe").unwrap_or(name) }
+fn strip_exe(name: &str) -> &str {
+    name.strip_suffix(".exe")
+        .or_else(|| name.strip_suffix(".EXE"))
+        .or_else(|| name.strip_suffix(".Exe"))
+        .unwrap_or(name)
+}
 
 #[cfg(target_os = "windows")]
 use std::os::windows::ffi::OsStrExt;
@@ -358,11 +363,19 @@ pub fn find_wechat_v4_processes() -> Result<Vec<WeChatProcess>> {
     sys.refresh_specifics(RefreshKind::new().with_processes(ProcessRefreshKind::everything()));
 
     let mut results = Vec::new();
+    let total_procs = sys.processes().len();
+    tracing::info!(total_procs, "find_wechat_v4_processes: scanning processes");
     for (_pid, p) in sys.processes() {
         let name = strip_exe(p.name());
-        if name != "Weixin" { continue; }
+        if !name.eq_ignore_ascii_case("Weixin") { continue; }
         let cmdline = p.cmd().join(" ");
-        if cmdline.contains("--") { continue; }
+        tracing::info!(pid = p.pid().as_u32(), name, ?cmdline, "found Weixin process");
+        // 只过滤带 --type= 的子进程 (wxplayer, wxocr, wxutility 等)
+        // 主进程可能带 --scene=startmenu 等参数，不应过滤
+        if cmdline.contains("--type=") {
+            tracing::debug!(pid = p.pid().as_u32(), "skipping Weixin subprocess (has --type=)");
+            continue;
+        }
         let exe_path = p.exe().map(|pp| pp.to_string_lossy().to_string()).unwrap_or_default();
         let full_version = if !exe_path.is_empty() { get_file_version(&exe_path) } else { None };
 
@@ -381,6 +394,7 @@ pub fn find_wechat_v4_processes() -> Result<Vec<WeChatProcess>> {
         });
     }
 
+    tracing::info!(count = results.len(), "find_wechat_v4_processes: done");
     Ok(results)
 }
 
@@ -390,7 +404,7 @@ pub fn find_wechat_v3_processes() -> Result<Vec<WeChatProcess>> {
     let mut results = Vec::new();
     for (_pid, p) in sys.processes() {
         let name = strip_exe(p.name());
-        if name != "WeChat" { continue; }
+        if !name.eq_ignore_ascii_case("WeChat") { continue; }
         let exe_path = p.exe().map(|pp| pp.to_string_lossy().to_string()).unwrap_or_default();
         let full_version = if !exe_path.is_empty() { get_file_version(&exe_path) } else { None };
         let (mut data_dir, mut account_name) = (None, None);
