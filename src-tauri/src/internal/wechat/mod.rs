@@ -5,9 +5,14 @@ pub mod mac;
 use anyhow::{Result, anyhow};
 use common::types::WechatKeys;
 use crate::internal::wechat::common::extractor_trait::KeyExtractor;
+
+#[cfg(target_os = "windows")]
 use win::v4::extractor::WinV4Extractor;
+#[cfg(target_os = "windows")]
 use win::v3::extractor::WinV3Extractor;
+#[cfg(target_os = "macos")]
 use mac::v4::extractor::MacV4Extractor;
+#[cfg(target_os = "macos")]
 use mac::v3::extractor::MacV3Extractor;
 
 #[derive(Debug, Clone)]
@@ -18,11 +23,13 @@ pub enum WxMajor { V4, V3, Unknown }
 
 fn detect_platform() -> WxPlatform { if cfg!(target_os = "macos") { WxPlatform::Mac } else { WxPlatform::Win } }
 
-fn choose_extractors(p: &WxPlatform) -> Vec<Box<dyn KeyExtractor>> {
-  match p {
-    WxPlatform::Win => vec![Box::new(WinV4Extractor), Box::new(WinV3Extractor)],
-    WxPlatform::Mac => vec![Box::new(MacV4Extractor), Box::new(MacV3Extractor)],
-  }
+fn choose_extractors(_p: &WxPlatform) -> Vec<Box<dyn KeyExtractor>> {
+  #[cfg(target_os = "windows")]
+  { vec![Box::new(WinV4Extractor), Box::new(WinV3Extractor)] }
+  #[cfg(target_os = "macos")]
+  { vec![Box::new(MacV4Extractor), Box::new(MacV3Extractor)] }
+  #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+  { vec![] }
 }
 
 pub fn extract_db_keys(data_dir: Option<&str>) -> Result<WechatKeys> {

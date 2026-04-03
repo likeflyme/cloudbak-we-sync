@@ -1,6 +1,10 @@
+#[cfg(target_os = "windows")]
 pub mod winproc;
+#[cfg(target_os = "windows")]
 pub mod memory;
+#[cfg(target_os = "windows")]
 pub mod validator;
 pub mod dat2img;
+#[cfg(target_os = "windows")]
 pub mod avatar;
 pub mod db_decrypt;

@@ -102,7 +102,7 @@
 
 <script setup lang="ts">
 import { ref, provide, computed, onMounted } from 'vue'
-import { NLayout, NLayoutContent, NLayoutHeader, NButton, NIcon, NDropdown, NModal, NInput, NRadioGroup, NRadio, NSpace } from 'naive-ui'
+import { NLayout, NLayoutContent, NLayoutHeader, NButton, NIcon, NDropdown, NModal, NInput, NRadioGroup, NRadio, NSpace, useDialog, useMessage } from 'naive-ui'
 import { invoke } from '@tauri-apps/api/core'
 import { removeToken } from '@/common/login'
 import { useRouter } from 'vue-router'
@@ -124,6 +124,24 @@ import type { LogEntry } from '@/components/SessionDetail/LoadingState.vue'
 import type { Session, PartialSession } from '@/models/session'
 
 const router = useRouter()
+const dialog = useDialog()
+const message = useMessage()
+
+/** 用 Naive UI Dialog 模拟 window.confirm，返回 Promise<boolean> */
+const nConfirm = (content: string, title = '提示'): Promise<boolean> => {
+  return new Promise((resolve) => {
+    dialog.warning({
+      title,
+      content,
+      positiveText: '确定',
+      negativeText: '取消',
+      onPositiveClick: () => resolve(true),
+      onNegativeClick: () => resolve(false),
+      onClose: () => resolve(false),
+      onMaskClick: () => resolve(false),
+    })
+  })
+}
 
 // 实际应从 API 获取
 const sessions = ref<Session[]>([])
@@ -195,7 +213,7 @@ const onMenuSelect = async (key: string) => {
   } else if (key === 'about') {
     showAboutDialog.value = true
   } else if (key === 'logout') {
-    const ok = window.confirm('确定要退出登录吗？')
+    const ok = await nConfirm('确定要退出登录吗？')
     if (!ok) return
     removeToken()
     try { invoke('clear_auth_context') } catch {}
@@ -240,9 +258,10 @@ const promptDirSelection = (dirs: string[]): Promise<string | null> => {
 
 // 显示添加对话框 -> 确认后调用后端提取并创建会话
 const showAddDialog = async () => {
+  console.log('开始添加会话')
   selected.value = null
 
-  const ok = window.confirm('是否开始扫描并添加微信会话？\n请确保已登录且微信正在运行。')
+  const ok = await nConfirm('是否开始扫描并添加微信会话？\n请确保已登录且微信正在运行。')
   if (!ok) return
 
   isAddingSession.value = true
@@ -293,7 +312,7 @@ const showAddDialog = async () => {
     if (!dbRes?.ok) {
       const errMsg = dbRes?.error || '提取数据库密钥失败'
       appendLog(`数据库密钥提取失败: ${errMsg}`, 'error')
-      if (!extractionCancelled.value) { alert(errMsg) }
+      if (!extractionCancelled.value) { message.error(errMsg) }
       return
     }
 
@@ -366,12 +385,12 @@ const showAddDialog = async () => {
     } else {
       const errMsg = res?.error || '提取失败，未返回可用数据'
       appendLog(`提取失败: ${errMsg}`, 'error')
-      if (!extractionCancelled.value) { alert(errMsg) }
+      if (!extractionCancelled.value) { message.error(errMsg) }
     }
   } catch (e: any) {
     const errMsg = e?.message || String(e)
     appendLog(`调用异常: ${errMsg}`, 'error')
-    if (!extractionCancelled.value) { alert(`调用失败: ${errMsg}`) }
+    if (!extractionCancelled.value) { message.error(`调用失败: ${errMsg}`) }
   } finally {
     if (!extractionCancelled.value) { isAddingSession.value = false }
   }

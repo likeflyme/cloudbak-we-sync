@@ -53,7 +53,16 @@ tracing-appender = "0.2"
 tauri-plugin-store = "2"
 sha1 = "0.10"
 
-# windows api (CNG + Registry + FileSystem + SystemInformation)
+# windows / winapi 已移至 [target.'cfg(target_os = "windows")'.dependencies]
+tauri-plugin-updater = "2.9.0"
+tauri-plugin-autostart = "2"
+yara = { version = "0.29", features = ["yara-static", "vendored"] }
+regex = "1.11"
+encoding_rs = "0.8"
+tokio = { version = "1", features = ["rt"] }
+
+# windows api (CNG + Registry + FileSystem + SystemInformation) — Windows only
+[target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.58", features = [
     "Win32_Foundation",
     "Win32_System_Threading",
@@ -67,9 +76,8 @@ windows = { version = "0.58", features = [
     "Win32_UI_Shell",
     "Win32_Security_Cryptography",
     "Win32_System_ProcessStatus",
-    "Win32_System_Diagnostics_ToolHelp",  # added for module enumeration
+    "Win32_System_Diagnostics_ToolHelp",
 ] }
-# legacy winapi for Version APIs (GetFileVersionInfo*) and low-level handle work
 winapi = { version = "0.3", features = [
     "winver",
     "minwindef",
@@ -79,12 +87,6 @@ winapi = { version = "0.3", features = [
     "fileapi",
     "winnt",
 ] }
-tauri-plugin-updater = "2.9.0"
-tauri-plugin-autostart = "2"
-yara = { version = "0.29", features = ["yara-static", "vendored"] }
-regex = "1.11"
-encoding_rs = "0.8"
-tokio = { version = "1", features = ["rt"] }
 
 # macOS: libc for getpwnam/passwd (resolve real HOME under sudo)
 [target.'cfg(target_os = "macos")'.dependencies]
