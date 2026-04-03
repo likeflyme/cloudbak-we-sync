@@ -86,3 +86,7 @@ regex = "1.11"
 encoding_rs = "0.8"
 tokio = { version = "1", features = ["rt"] }
 
+# macOS: libc for getpwnam/passwd (resolve real HOME under sudo)
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
+

@@ -5629,6 +5629,7 @@ dependencies = [
  "encoding_rs",
  "hex",
  "hmac",
+ "libc",
  "memchr",
  "notify",
  "once_cell",

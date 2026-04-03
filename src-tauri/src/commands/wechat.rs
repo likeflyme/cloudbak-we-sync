@@ -1,17 +1,12 @@
-// New: expose a command to extract WeChat v4 keys on Windows
-#[cfg(target_os = "windows")]
+// Cancel flag for long-running extraction tasks (Windows uses it in memory scanning)
 use once_cell::sync::Lazy;
-#[cfg(target_os = "windows")]
 use std::sync::atomic::{AtomicBool, Ordering};
 
-#[cfg(target_os = "windows")]
 pub static EXTRACT_CANCEL_FLAG: Lazy<AtomicBool> = Lazy::new(|| AtomicBool::new(false));
 
-#[cfg(target_os = "windows")]
 pub fn is_extract_cancelled() -> bool { EXTRACT_CANCEL_FLAG.load(Ordering::Relaxed) }
 
 #[tauri::command]
-#[cfg(target_os = "windows")]
 pub async fn cancel_extract_wechat_keys() -> Result<(), String> {
     EXTRACT_CANCEL_FLAG.store(true, Ordering::Relaxed);
     tracing::info!("cancel_extract_wechat_keys invoked; flag set");
@@ -19,7 +14,7 @@ pub async fn cancel_extract_wechat_keys() -> Result<(), String> {
 }
 
 #[tauri::command]
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 pub async fn extract_wechat_db_keys(data_dir: Option<String>) -> Result<serde_json::Value, String> {
     use crate::internal::wechat;
     // reset cancel flag at start
@@ -35,7 +30,7 @@ pub async fn extract_wechat_db_keys(data_dir: Option<String>) -> Result<serde_js
 }
 
 #[tauri::command]
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 pub async fn extract_wechat_img_keys(data_dir: Option<String>) -> Result<serde_json::Value, String> {
     use crate::internal::wechat;
     // reset cancel flag at start
@@ -61,7 +56,7 @@ pub async fn extract_wechat_img_keys(data_dir: Option<String>) -> Result<serde_j
 }
 
 #[tauri::command]
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 pub async fn extract_wechat_v3_avatar(wx_id: String, data_dir: String) -> Result<serde_json::Value, String> {
     use std::path::PathBuf;
     use base64::Engine;
@@ -118,21 +113,21 @@ pub async fn extract_wechat_v3_avatar(wx_id: String, data_dir: String) -> Result
 }
 
 
-// 非Windows不支持
+// Unsupported platforms (not Windows, not macOS)
 #[tauri::command]
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 pub async fn extract_wechat_db_keys(_data_dir: Option<String>) -> Result<serde_json::Value, String> {
-    Ok(serde_json::json!({ "ok": false, "error": "Windows only" }))
+    Ok(serde_json::json!({ "ok": false, "error": "Unsupported platform" }))
 }
 
 #[tauri::command]
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 pub async fn extract_wechat_img_keys(_data_dir: Option<String>) -> Result<serde_json::Value, String> {
-    Ok(serde_json::json!({ "ok": false, "error": "Windows only" }))
+    Ok(serde_json::json!({ "ok": false, "error": "Unsupported platform" }))
 }
 
 #[tauri::command]
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 pub async fn detect_data_dirs() -> Result<serde_json::Value, String> {
     use crate::internal::wechat;
     tracing::info!("detect_data_dirs invoked");
@@ -143,9 +138,9 @@ pub async fn detect_data_dirs() -> Result<serde_json::Value, String> {
 }
 
 #[tauri::command]
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 pub async fn detect_data_dirs() -> Result<serde_json::Value, String> {
-    Ok(serde_json::json!({ "ok": false, "error": "Windows only", "dirs": [] }))
+    Ok(serde_json::json!({ "ok": false, "error": "Unsupported platform", "dirs": [] }))
 }
 
 #[tauri::command]
