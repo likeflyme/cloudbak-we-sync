@@ -339,7 +339,7 @@ const showAddDialog = async () => {
       if (dataDir && dataDir.startsWith('\\\\?\\')) {
         dataDir = dataDir.slice(4)
       }
-      const wx_id = dataDir?.split('\\').pop() || '';
+      const wx_id = dataDir?.split(/[/\\]/).pop() || '';
 
       const clientType = res.clientType || 'win'
       const clientVersion = res.clientVersion || ''
