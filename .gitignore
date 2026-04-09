@@ -25,3 +25,5 @@ dist-ssr
 wechat-dump-rs-4
 chatlog
 target
+converter.py
+find_image_key.c

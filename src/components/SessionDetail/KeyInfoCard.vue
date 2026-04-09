@@ -303,11 +303,13 @@ const handleExtractImgKeys = async () => {
     const dataDir = props.session.wx_dir || null
     const imgRes: any = await invoke('extract_wechat_img_keys', { dataDir })
     if (imgRes?.ok) {
-      // aes_key: 后端返回的是 ASCII 文本，转成十六进制
+      // aes_key: macOS 后端返回已经是十六进制字符串（hex::encode 的原始字节），Windows 返回 ASCII 文本需转换
       const rawAesKey: string = imgRes.imageKey || ''
-      const aesKeyHex = rawAesKey ? asciiToHex(rawAesKey) : ''
+      const aesKeyHex = rawAesKey
+        ? (imgRes.clientType === 'mac' ? rawAesKey : asciiToHex(rawAesKey))
+        : ''
 
-      // xor_key: 后端返回的可能是 "0x1a" 格式，转成十进制
+      // xor_key: 后端返回 "0x1a" 等格式，转成十进制
       const rawXorKey: string = imgRes.xorKey != null ? String(imgRes.xorKey) : ''
       const xorKeyDecimal = rawXorKey ? xorKeyToDecimal(rawXorKey) : ''
 
