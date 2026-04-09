@@ -109,7 +109,7 @@ import { removeToken } from '@/common/login'
 import { useRouter } from 'vue-router'
 import { getSessions, addSession } from '@/api/user'
 import { getSysInfo } from '@/api/sys'
-import { setSysInfoToStore, clearStoreExceptEndpoint } from '@/common/store'
+import { setSysInfoToStore, getSysInfoFromStore, clearStoreExceptEndpoint } from '@/common/store'
 import { getVersion } from '@tauri-apps/api/app'
 // 临时类型声明避免 TS 报错（若 @tauri-apps/plugin-updater 未提供类型）
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
@@ -257,10 +257,38 @@ const promptDirSelection = (dirs: string[]): Promise<string | null> => {
   })
 }
 
+const parseSemver = (v: string): [number, number, number] => {
+  const s = String(v || '').trim()
+  const m = s.match(/(\d+)\.(\d+)\.(\d+)/)
+  if (!m) return [0, 0, 0]
+  return [Number(m[1]) || 0, Number(m[2]) || 0, Number(m[3]) || 0]
+}
+const gteSemver = (a: string, b: string) => {
+  const [a1, a2, a3] = parseSemver(a)
+  const [b1, b2, b3] = parseSemver(b)
+  if (a1 !== b1) return a1 > b1
+  if (a2 !== b2) return a2 > b2
+  return a3 >= b3
+}
+const MIN_ADD_SERVER_VERSION = '2.1.0'
+
 // 显示添加对话框 -> 确认后调用后端提取并创建会话
 const showAddDialog = async () => {
   console.log('开始添加会话')
   selected.value = null
+
+  // 检查服务端版本 >= 2.1.0
+  try {
+    const sysInfo: any = await getSysInfoFromStore()
+    const ver = sysInfo?.sys_version || ''
+    if (!ver || !gteSemver(ver, MIN_ADD_SERVER_VERSION)) {
+      message.error(`服务端版本需 >= ${MIN_ADD_SERVER_VERSION} 才能添加会话（当前：${ver || 'unknown'}），请升级服务端后重新登录客户端。`)
+      return
+    }
+  } catch {
+    message.error('无法获取服务端版本信息，请稍后重试')
+    return
+  }
 
   const ok = await nConfirm('是否开始扫描并添加微信会话？\n请确保已登录且微信正在运行。')
   if (!ok) return
@@ -340,7 +368,7 @@ const showAddDialog = async () => {
       if (dataDir && dataDir.startsWith('\\\\?\\')) {
         dataDir = dataDir.slice(4)
       }
-      const wx_id = dataDir?.split('\\').pop() || '';
+      const wx_id = dataDir?.split(/[/\\]/).pop() || '';
 
       const clientType = res.clientType || 'win'
       const clientVersion = res.clientVersion || ''

@@ -1,6 +1,7 @@
 use anyhow::{Result, anyhow};
 use crate::internal::wechat::common::types::WechatKeys;
 use crate::internal::wechat::common::extractor_trait::KeyExtractor;
+use crate::commands::wechat::is_extract_cancelled;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use sysinfo::{ProcessRefreshKind, RefreshKind, System};
@@ -579,7 +580,7 @@ impl MacV4Extractor {
 
         let mut results: HashSet<String> = HashSet::new();
 
-        for (base_addr, region_size) in &regions {
+        for (base_addr, region_size, _prot) in &regions {
             let buf = match Self::read_process_memory(pid, *base_addr, *region_size) {
                 Some(b) => b,
                 None => continue,
@@ -621,6 +622,7 @@ impl MacV4Extractor {
     }
 
     /// Scan process memory for AES image key (16/32 char alphanumeric)
+    /// Two-phase: scan RW regions first (heap), then remaining readable regions
     #[cfg(target_os = "macos")]
     fn scan_aes_key_from_memory(pid: u32, ciphertext: &[u8; 16]) -> Result<Option<String>> {
         #[inline]
@@ -628,69 +630,100 @@ impl MacV4Extractor {
             matches!(b, b'0'..=b'9' | b'a'..=b'z' | b'A'..=b'Z')
         }
 
-        let regions = Self::enumerate_memory_regions(pid)?;
-        let total_mb = regions.iter().map(|r| r.1 as f64).sum::<f64>() / 1024.0 / 1024.0;
-        tracing::info!(
-            "scan_aes_key: {} regions ({:.0} MB)",
-            regions.len(),
-            total_mb
-        );
+        const VM_PROT_WRITE: i32 = 0x02;
 
-        let mut candidates_32 = 0usize;
-        let mut candidates_16 = 0usize;
+        /// Scan a set of regions, return found key or None
+        fn scan_regions(
+            pid: u32,
+            regions: &[(u64, usize)],
+            ciphertext: &[u8; 16],
+        ) -> Result<Option<String>> {
+            let mut candidates_32 = 0usize;
+            let mut candidates_16 = 0usize;
 
-        for (base_addr, region_size) in &regions {
-            let buf = match Self::read_process_memory(pid, *base_addr, *region_size) {
-                Some(b) if b.len() >= 32 => b,
-                _ => continue,
-            };
-
-            let mut pos = 0usize;
-            while pos < buf.len() {
-                if !is_alnum(buf[pos]) {
-                    pos += 1;
-                    continue;
+            for (idx, &(base_addr, region_size)) in regions.iter().enumerate() {
+                if is_extract_cancelled() { return Ok(None); }
+                if idx % 100 == 0 {
+                    tracing::debug!("scanning region {}/{}", idx, regions.len());
                 }
-                // Left boundary check
-                if pos > 0 && is_alnum(buf[pos - 1]) {
-                    while pos < buf.len() && is_alnum(buf[pos]) {
-                        pos += 1;
+
+                let buf = match MacV4Extractor::read_process_memory(pid, base_addr, region_size) {
+                    Some(b) if b.len() >= 32 => b,
+                    _ => continue,
+                };
+
+                let mut pos = 0usize;
+                while pos < buf.len() {
+                    if !is_alnum(buf[pos]) { pos += 1; continue; }
+                    if pos > 0 && is_alnum(buf[pos - 1]) {
+                        while pos < buf.len() && is_alnum(buf[pos]) { pos += 1; }
+                        continue;
                     }
-                    continue;
-                }
-                let start = pos;
-                while pos < buf.len() && is_alnum(buf[pos]) {
-                    pos += 1;
-                }
-                let run_len = pos - start;
+                    let start = pos;
+                    while pos < buf.len() && is_alnum(buf[pos]) { pos += 1; }
+                    let run_len = pos - start;
 
-                if run_len == 32 {
-                    candidates_32 += 1;
-                    if MacV4Extractor::try_aes_key(&buf[start..start + 16], ciphertext) {
-                        let key_str = std::str::from_utf8(&buf[start..start + 16])
-                            .unwrap_or_default()
-                            .to_string();
-                        tracing::info!("Found AES key (32-char, first 16): {}", &key_str);
-                        return Ok(Some(key_str));
-                    }
-                } else if run_len == 16 {
-                    candidates_16 += 1;
-                    if MacV4Extractor::try_aes_key(&buf[start..start + 16], ciphertext) {
-                        let key_str = std::str::from_utf8(&buf[start..start + 16])
-                            .unwrap_or_default()
-                            .to_string();
-                        tracing::info!("Found AES key (16-char): {}", &key_str);
-                        return Ok(Some(key_str));
+                    if run_len == 32 {
+                        candidates_32 += 1;
+                        if MacV4Extractor::try_aes_key(&buf[start..start + 16], ciphertext) {
+                            let key_str = std::str::from_utf8(&buf[start..start + 16])
+                                .unwrap_or_default().to_string();
+                            tracing::info!("Found AES key (32-char, first 16): {}", &key_str);
+                            return Ok(Some(key_str));
+                        }
+                    } else if run_len == 16 {
+                        candidates_16 += 1;
+                        if MacV4Extractor::try_aes_key(&buf[start..start + 16], ciphertext) {
+                            let key_str = std::str::from_utf8(&buf[start..start + 16])
+                                .unwrap_or_default().to_string();
+                            tracing::info!("Found AES key (16-char): {}", &key_str);
+                            return Ok(Some(key_str));
+                        }
                     }
                 }
             }
+
+            tracing::debug!("tested {} x 32-char + {} x 16-char candidates", candidates_32, candidates_16);
+            Ok(None)
         }
 
-        tracing::debug!(
-            "tested {} x 32-char + {} x 16-char candidates",
-            candidates_32,
-            candidates_16
+        let all_regions = Self::enumerate_memory_regions(pid)?;
+
+        // Split into RW regions and other readable regions
+        let mut rw_regions: Vec<(u64, usize)> = Vec::new();
+        let mut other_regions: Vec<(u64, usize)> = Vec::new();
+        for (addr, size, prot) in &all_regions {
+            if (*prot & VM_PROT_WRITE) != 0 {
+                rw_regions.push((*addr, *size));
+            } else {
+                other_regions.push((*addr, *size));
+            }
+        }
+
+        let rw_mb = rw_regions.iter().map(|r| r.1 as f64).sum::<f64>() / 1024.0 / 1024.0;
+        let all_mb = all_regions.iter().map(|r| r.1 as f64).sum::<f64>() / 1024.0 / 1024.0;
+        tracing::info!(
+            "RW regions: {} ({:.0} MB), total: {} ({:.0} MB)",
+            rw_regions.len(), rw_mb, all_regions.len(), all_mb
         );
+
+        // Phase 1: scan RW regions (key most likely in heap)
+        tracing::info!("Phase 1: scanning RW memory regions");
+        if let Some(key) = scan_regions(pid, &rw_regions, ciphertext)? {
+            return Ok(Some(key));
+        }
+
+        if is_extract_cancelled() {
+            tracing::info!("scan_aes_key_from_memory cancelled");
+            return Ok(None);
+        }
+
+        // Phase 2: scan remaining readable regions
+        tracing::info!("Phase 2: scanning remaining memory regions");
+        if let Some(key) = scan_regions(pid, &other_regions, ciphertext)? {
+            return Ok(Some(key));
+        }
+
         tracing::warn!("AES image key not found in process memory");
         Ok(None)
     }
@@ -703,8 +736,9 @@ impl MacV4Extractor {
     // ──────────── macOS Mach VM helpers ────────────
 
     /// Enumerate readable memory regions of a process via mach_vm_region
+    /// Returns (address, size, protection) tuples
     #[cfg(target_os = "macos")]
-    fn enumerate_memory_regions(pid: u32) -> Result<Vec<(u64, usize)>> {
+    fn enumerate_memory_regions(pid: u32) -> Result<Vec<(u64, usize, i32)>> {
         use std::mem;
 
         // Mach kernel types & functions
@@ -758,7 +792,7 @@ impl MacV4Extractor {
                 ));
             }
 
-            let mut regions: Vec<(u64, usize)> = Vec::new();
+            let mut regions: Vec<(u64, usize, i32)> = Vec::new();
             let mut address: u64 = 0;
             let max_region_size: usize = 512 * 1024 * 1024; // skip huge regions
 
@@ -786,7 +820,7 @@ impl MacV4Extractor {
 
                 // Only include readable regions within size limit
                 if (protection & VM_PROT_READ) != 0 && (size as usize) <= max_region_size {
-                    regions.push((address, size as usize));
+                    regions.push((address, size as usize, protection));
                 }
 
                 address = address.saturating_add(size);
@@ -800,7 +834,7 @@ impl MacV4Extractor {
     }
 
     #[cfg(not(target_os = "macos"))]
-    fn enumerate_memory_regions(_pid: u32) -> Result<Vec<(u64, usize)>> {
+    fn enumerate_memory_regions(_pid: u32) -> Result<Vec<(u64, usize, i32)>> {
         Ok(vec![])
     }
 
