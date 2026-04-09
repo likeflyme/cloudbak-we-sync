@@ -83,15 +83,15 @@ impl KeyExtractor for MacV4Extractor {
             .map(|s| s.to_string())
             .or_else(|| selected.data_dir.clone());
 
-        // 1. Find V2 .dat ciphertext & xor key from data_dir
+        // 1. Discover V2 .dat ciphertext & xor key from msg directory
         let (ciphertext, xor_key) = if let Some(ref dir) = effective_dir {
-            let attach_dir = Path::new(dir).join("msg").join("attach");
-            (Self::find_v2_ciphertext(&attach_dir), Self::find_xor_key(&attach_dir))
+            let msg_dir = Path::new(dir).join("msg");
+            (Self::find_v2_ciphertext(&msg_dir), Self::find_xor_key(&msg_dir))
         } else {
             (None, None)
         };
 
-        // 2. Scan process memory for AES key
+        // 2. Scan process memory for raw binary AES key (find_image_key.c logic)
         let image_key = if let Some(ref ct) = ciphertext {
             Self::scan_aes_key_from_memory(pid, ct)?
         } else {
@@ -429,19 +429,63 @@ impl MacV4Extractor {
 
     // ──────────── V2 .dat ciphertext & XOR key (same as Windows) ────────────
 
-    /// Find first 16-byte AES ciphertext block from a V2 .dat thumbnail file
+    /// Find first 16-byte AES ciphertext block from V2 .dat files.
+    /// Scans all .dat files under msg_dir for the V2 magic header, returns the
+    /// most common ciphertext block (sorted by occurrence, picks most frequent).
     /// V2 structure: [6B magic: 07 08 'V' '2' 08 07] [4B aes_size LE] [4B xor_size LE] [1B padding] [aes_data...]
-    fn find_v2_ciphertext(attach_dir: &Path) -> Option<[u8; 16]> {
+    fn find_v2_ciphertext(msg_dir: &Path) -> Option<[u8; 16]> {
+        use std::collections::HashMap;
         use std::io::Read;
         const V2_MAGIC: &[u8; 6] = b"\x07\x08V2\x08\x07";
 
-        let mut dat_files: Vec<PathBuf> = Vec::new();
-        for entry in walkdir::WalkDir::new(attach_dir).into_iter().flatten() {
+        let mut ct_counts: HashMap<[u8; 16], (usize, PathBuf)> = HashMap::new();
+
+        for entry in walkdir::WalkDir::new(msg_dir).into_iter().flatten() {
             if !entry.file_type().is_file() {
                 continue;
             }
             let name = entry.file_name().to_string_lossy();
-            if name.ends_with("_t.dat") {
+            if !name.ends_with(".dat") {
+                continue;
+            }
+            if let Ok(mut fp) = std::fs::File::open(entry.path()) {
+                let mut header = [0u8; 31];
+                if fp.read_exact(&mut header).is_ok() && &header[..6] == V2_MAGIC {
+                    let mut blk = [0u8; 16];
+                    blk.copy_from_slice(&header[15..31]);
+                    let entry_ref = ct_counts.entry(blk).or_insert((0, entry.path().to_path_buf()));
+                    entry_ref.0 += 1;
+                }
+            }
+        }
+
+        if ct_counts.is_empty() {
+            tracing::warn!("find_v2_ciphertext: no V2 .dat files found in {}", msg_dir.display());
+            return None;
+        }
+
+        // Pick the most frequently occurring ciphertext block
+        let (best_ct, (count, sample)) = ct_counts
+            .into_iter()
+            .max_by_key(|(_, (cnt, _))| *cnt)?;
+        tracing::info!("V2 ciphertext ({} files): {} — sample: {}", count, hex::encode(best_ct), sample.display());
+        Some(best_ct)
+    }
+
+    /// Derive XOR key from V2 .dat file tails.
+    /// JPEG images end with FF D9; XOR-encrypted tail bytes reveal the XOR key.
+    fn find_xor_key(msg_dir: &Path) -> Option<u8> {
+        use std::collections::HashMap;
+        use std::io::{Read, Seek, SeekFrom};
+        const V2_MAGIC: &[u8; 6] = b"\x07\x08V2\x08\x07";
+
+        let mut dat_files: Vec<PathBuf> = Vec::new();
+        for entry in walkdir::WalkDir::new(msg_dir).into_iter().flatten() {
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy();
+            if name.ends_with(".dat") {
                 dat_files.push(entry.path().to_path_buf());
             }
             if dat_files.len() >= 200 {
@@ -454,47 +498,8 @@ impl MacV4Extractor {
             mb.cmp(&ma)
         });
 
-        for f in dat_files.iter().take(100) {
-            if let Ok(mut fp) = std::fs::File::open(f) {
-                let mut header = [0u8; 31];
-                if fp.read_exact(&mut header).is_ok() && &header[..6] == V2_MAGIC {
-                    let mut blk = [0u8; 16];
-                    blk.copy_from_slice(&header[15..31]);
-                    tracing::info!("V2 ciphertext from: {}", f.display());
-                    return Some(blk);
-                }
-            }
-        }
-        None
-    }
-
-    /// Derive XOR key from V2 thumbnail file tails (JPEG ends with FF D9)
-    fn find_xor_key(attach_dir: &Path) -> Option<u8> {
-        use std::collections::HashMap;
-        use std::io::{Read, Seek, SeekFrom};
-        const V2_MAGIC: &[u8; 6] = b"\x07\x08V2\x08\x07";
-
-        let mut dat_files: Vec<PathBuf> = Vec::new();
-        for entry in walkdir::WalkDir::new(attach_dir).into_iter().flatten() {
-            if !entry.file_type().is_file() {
-                continue;
-            }
-            let name = entry.file_name().to_string_lossy();
-            if name.ends_with("_t.dat") {
-                dat_files.push(entry.path().to_path_buf());
-            }
-            if dat_files.len() >= 100 {
-                break;
-            }
-        }
-        dat_files.sort_by(|a, b| {
-            let ma = a.metadata().and_then(|m| m.modified()).ok();
-            let mb = b.metadata().and_then(|m| m.modified()).ok();
-            mb.cmp(&ma)
-        });
-
         let mut tail_counts: HashMap<(u8, u8), usize> = HashMap::new();
-        for f in dat_files.iter().take(32) {
+        for f in dat_files.iter().take(64) {
             if let Ok(mut fp) = std::fs::File::open(f) {
                 let mut head = [0u8; 6];
                 if fp.read_exact(&mut head).is_err() || &head != V2_MAGIC {
@@ -538,7 +543,8 @@ impl MacV4Extractor {
         Some(xor_key)
     }
 
-    /// Try AES-ECB decryption of ciphertext block with given key; check for image signatures
+    /// Try AES-ECB decryption of ciphertext block with given key; check for image signatures.
+    /// Uses strict validation matching find_image_key.c's is_image_magic() to avoid false positives.
     fn try_aes_key(key: &[u8], ciphertext: &[u8; 16]) -> bool {
         use aes::cipher::{BlockDecrypt, KeyInit};
         use aes::Aes128;
@@ -549,13 +555,53 @@ impl MacV4Extractor {
         let cipher = Aes128::new(k);
         let mut blk = aes::cipher::generic_array::GenericArray::from(*ciphertext);
         cipher.decrypt_block(&mut blk);
-        let dec = blk.as_slice();
-        // JPEG: FF D8 FF, PNG: 89 50 4E 47, WEBP: RIFF, WXGF: wxgf, GIF: GIF
-        dec.starts_with(b"\xFF\xD8\xFF")
-            || dec.starts_with(&[0x89, 0x50, 0x4E, 0x47])
-            || dec.starts_with(b"RIFF")
-            || dec.starts_with(b"wxgf")
-            || dec.starts_with(b"GIF")
+        let pt = blk.as_slice();
+        Self::is_image_magic(pt)
+    }
+
+    /// Strict image magic detection matching find_image_key.c's is_image_magic().
+    /// Validates image headers with secondary checks to eliminate false positives.
+    fn is_image_magic(pt: &[u8]) -> bool {
+        if pt.len() < 16 {
+            return false;
+        }
+        // JPEG: FF D8 FF xx where xx >= C0 and xx != FF
+        if pt[0] == 0xFF && pt[1] == 0xD8 && pt[2] == 0xFF && pt[3] >= 0xC0 && pt[3] != 0xFF {
+            if pt[3] == 0xE0 {
+                // JFIF: verify "JF" at offset 6
+                return pt[6] == b'J' && pt[7] == b'F';
+            }
+            if pt[3] == 0xE1 {
+                // EXIF: verify "Ex" at offset 6
+                return pt[6] == b'E' && pt[7] == b'x';
+            }
+            // Other markers: verify length field is sane (big-endian, 2..32767)
+            let len = ((pt[4] as u16) << 8) | pt[5] as u16;
+            return len >= 2 && len < 0x8000;
+        }
+        // PNG: full 8-byte signature
+        if pt[0] == 0x89 && pt[1] == 0x50 && pt[2] == 0x4E && pt[3] == 0x47
+            && pt[4] == 0x0D && pt[5] == 0x0A && pt[6] == 0x1A && pt[7] == 0x0A
+        {
+            return true;
+        }
+        // GIF: "GIF89a" or "GIF87a"
+        if pt[0] == b'G' && pt[1] == b'I' && pt[2] == b'F' && pt[3] == b'8'
+            && (pt[4] == b'9' || pt[4] == b'7') && pt[5] == b'a'
+        {
+            return true;
+        }
+        // WebP: "RIFF....WEBP"
+        if pt[0] == b'R' && pt[1] == b'I' && pt[2] == b'F' && pt[3] == b'F'
+            && pt[8] == b'W' && pt[9] == b'E' && pt[10] == b'B' && pt[11] == b'P'
+        {
+            return true;
+        }
+        // WXGF: "wxgf"
+        if pt[0] == b'w' && pt[1] == b'x' && pt[2] == b'g' && pt[3] == b'f' {
+            return true;
+        }
+        false
     }
 
     // ──────────── macOS process memory scanning via Mach APIs ────────────
@@ -621,75 +667,75 @@ impl MacV4Extractor {
         Ok(vec![])
     }
 
-    /// Scan process memory for AES image key (16/32 char alphanumeric)
-    /// Two-phase: scan RW regions first (heap), then remaining readable regions
+    /// Scan process memory for AES image key using the find_image_key.c approach:
+    ///
+    /// Method 1: Every 16-byte aligned position is tried as a raw binary AES-128-ECB key.
+    ///           Decrypt the ciphertext block; if the result has an image magic header, the key is found.
+    ///
+    /// Method 2: Runs of lowercase hex characters (a-f, 0-9) of length >= 16 are scanned at
+    ///           every byte offset within the run (skipping aligned positions already covered by M1).
+    ///           The raw bytes at that position are used directly as the 16-byte AES key.
+    ///
+    /// Returns the key as a 32-character lowercase hex string (hex encoding of the 16 raw key bytes).
     #[cfg(target_os = "macos")]
     fn scan_aes_key_from_memory(pid: u32, ciphertext: &[u8; 16]) -> Result<Option<String>> {
-        #[inline]
-        fn is_alnum(b: u8) -> bool {
-            matches!(b, b'0'..=b'9' | b'a'..=b'z' | b'A'..=b'Z')
-        }
-
         const VM_PROT_WRITE: i32 = 0x02;
 
-        /// Scan a set of regions, return found key or None
-        fn scan_regions(
-            pid: u32,
-            regions: &[(u64, usize)],
-            ciphertext: &[u8; 16],
-        ) -> Result<Option<String>> {
-            let mut candidates_32 = 0usize;
-            let mut candidates_16 = 0usize;
+        fn scan_region_buf(buf: &[u8], ciphertext: &[u8; 16]) -> Option<String> {
+            if buf.len() < 16 {
+                return None;
+            }
 
-            for (idx, &(base_addr, region_size)) in regions.iter().enumerate() {
-                if is_extract_cancelled() { return Ok(None); }
-                if idx % 100 == 0 {
-                    tracing::debug!("scanning region {}/{}", idx, regions.len());
+            // Method 1: every 16-byte aligned position — raw binary key
+            let mut j = 0usize;
+            while j + 16 <= buf.len() {
+                if MacV4Extractor::try_aes_key(&buf[j..j + 16], ciphertext) {
+                    let key_hex = hex::encode(&buf[j..j + 16]);
+                    tracing::info!("Found AES key (binary aligned offset {}): {}", j, key_hex);
+                    return Some(key_hex);
                 }
+                j += 16;
+            }
 
-                let buf = match MacV4Extractor::read_process_memory(pid, base_addr, region_size) {
-                    Some(b) if b.len() >= 32 => b,
-                    _ => continue,
-                };
+            // Method 2: runs of lowercase hex chars (a-f, 0-9), length >= 16
+            // Test unaligned positions within each run
+            #[inline]
+            fn is_lowhex(b: u8) -> bool {
+                matches!(b, b'0'..=b'9' | b'a'..=b'f')
+            }
 
-                let mut pos = 0usize;
-                while pos < buf.len() {
-                    if !is_alnum(buf[pos]) { pos += 1; continue; }
-                    if pos > 0 && is_alnum(buf[pos - 1]) {
-                        while pos < buf.len() && is_alnum(buf[pos]) { pos += 1; }
-                        continue;
-                    }
-                    let start = pos;
-                    while pos < buf.len() && is_alnum(buf[pos]) { pos += 1; }
-                    let run_len = pos - start;
-
-                    if run_len == 32 {
-                        candidates_32 += 1;
-                        if MacV4Extractor::try_aes_key(&buf[start..start + 16], ciphertext) {
-                            let key_str = std::str::from_utf8(&buf[start..start + 16])
-                                .unwrap_or_default().to_string();
-                            tracing::info!("Found AES key (32-char, first 16): {}", &key_str);
-                            return Ok(Some(key_str));
+            let mut k = 0usize;
+            while k < buf.len() {
+                if !is_lowhex(buf[k]) {
+                    k += 1;
+                    continue;
+                }
+                let run_start = k;
+                while k < buf.len() && is_lowhex(buf[k]) {
+                    k += 1;
+                }
+                let run_end = k; // exclusive
+                let run_len = run_end - run_start;
+                if run_len >= 16 {
+                    let mut m = run_start;
+                    while m + 16 <= run_end {
+                        // Skip positions already tested in Method 1 (16-byte aligned)
+                        if m % 16 != 0 && MacV4Extractor::try_aes_key(&buf[m..m + 16], ciphertext) {
+                            let key_hex = hex::encode(&buf[m..m + 16]);
+                            tracing::info!("Found AES key (hex-run unaligned offset {}): {}", m, key_hex);
+                            return Some(key_hex);
                         }
-                    } else if run_len == 16 {
-                        candidates_16 += 1;
-                        if MacV4Extractor::try_aes_key(&buf[start..start + 16], ciphertext) {
-                            let key_str = std::str::from_utf8(&buf[start..start + 16])
-                                .unwrap_or_default().to_string();
-                            tracing::info!("Found AES key (16-char): {}", &key_str);
-                            return Ok(Some(key_str));
-                        }
+                        m += 1;
                     }
                 }
             }
 
-            tracing::debug!("tested {} x 32-char + {} x 16-char candidates", candidates_32, candidates_16);
-            Ok(None)
+            None
         }
 
         let all_regions = Self::enumerate_memory_regions(pid)?;
 
-        // Split into RW regions and other readable regions
+        // Scan RW regions first (key most likely in heap), then other readable
         let mut rw_regions: Vec<(u64, usize)> = Vec::new();
         let mut other_regions: Vec<(u64, usize)> = Vec::new();
         for (addr, size, prot) in &all_regions {
@@ -703,25 +749,28 @@ impl MacV4Extractor {
         let rw_mb = rw_regions.iter().map(|r| r.1 as f64).sum::<f64>() / 1024.0 / 1024.0;
         let all_mb = all_regions.iter().map(|r| r.1 as f64).sum::<f64>() / 1024.0 / 1024.0;
         tracing::info!(
-            "RW regions: {} ({:.0} MB), total: {} ({:.0} MB)",
+            "scan_aes_key: RW {} ({:.0} MB), total {} ({:.0} MB)",
             rw_regions.len(), rw_mb, all_regions.len(), all_mb
         );
 
-        // Phase 1: scan RW regions (key most likely in heap)
-        tracing::info!("Phase 1: scanning RW memory regions");
-        if let Some(key) = scan_regions(pid, &rw_regions, ciphertext)? {
-            return Ok(Some(key));
-        }
-
-        if is_extract_cancelled() {
-            tracing::info!("scan_aes_key_from_memory cancelled");
-            return Ok(None);
-        }
-
-        // Phase 2: scan remaining readable regions
-        tracing::info!("Phase 2: scanning remaining memory regions");
-        if let Some(key) = scan_regions(pid, &other_regions, ciphertext)? {
-            return Ok(Some(key));
+        for (phase, regions) in [("RW", &rw_regions), ("RO", &other_regions)] {
+            tracing::info!("Phase {}: scanning {} regions", phase, regions.len());
+            for (idx, &(base_addr, region_size)) in regions.iter().enumerate() {
+                if is_extract_cancelled() {
+                    tracing::info!("scan_aes_key_from_memory cancelled");
+                    return Ok(None);
+                }
+                if idx % 200 == 0 {
+                    tracing::debug!("  [{phase}] {}/{}", idx, regions.len());
+                }
+                let buf = match Self::read_process_memory(pid, base_addr, region_size) {
+                    Some(b) if b.len() >= 16 => b,
+                    _ => continue,
+                };
+                if let Some(key) = scan_region_buf(&buf, ciphertext) {
+                    return Ok(Some(key));
+                }
+            }
         }
 
         tracing::warn!("AES image key not found in process memory");
