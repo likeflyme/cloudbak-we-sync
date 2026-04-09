@@ -61,7 +61,6 @@ import type { Session } from '@/models/session'
 import { deleteSession as deleteSessionFromServer, updateSessionImgKey } from '@/api/user'
 import { invoke } from '@tauri-apps/api/core'
 import { endpoint, token as getToken } from '@/common/login'
-import { decrypt } from '@/api/task' // 新增: 同步完成后调用解密任务
 import { getSysInfoFromStore } from '@/common/store'
 
 const userId = Number(localStorage.getItem('user_id') || '0')
@@ -122,15 +121,7 @@ const startPolling = () => {
         stopPolling()
         // 新增: 若为手动同步且成功完成则调用后端解析
         if (st.state === 'done' && manualSyncInProgress.value && session.value) {
-          try {
-            await decrypt(session.value.id)
-            message.success('解析任务已启动')
-          } catch (e: any) {
-            console.error('decrypt error', e)
-            message.error(e?.message || '解析任务启动失败')
-          } finally {
-            manualSyncInProgress.value = false
-          }
+          manualSyncInProgress.value = false
         } else if (st.state !== 'running') {
           manualSyncInProgress.value = false
         }
