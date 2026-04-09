@@ -81,10 +81,11 @@
               <n-radio v-for="dir in detectedDirs" :key="dir" :value="dir" :label="dir" />
             </n-space>
           </n-radio-group>
+          <p style="margin-top:8px; color: red;">如果检测到多个数据目录，可以在微信中找一个文件，右键在文件夹中显示可查看目录</p>
         </template>
         <template v-else>
-          <p style="margin-bottom:8px; color:#999;">未检测到微信数据目录，请手动输入路径：</p>
-          <n-input v-model:value="manualDir" placeholder="例如：D:\xwechat_files\wxid_xxx\db_storage" clearable />
+          <p style="margin-bottom:8px; color:#999; size: 10px;">未检测到微信数据目录，请手动输入路径：</p>
+          <n-input v-model:value="manualDir" placeholder="例如：D:\xwechat_files\wxid_xxx" clearable />
         </template>
       </div>
       <template #footer>
