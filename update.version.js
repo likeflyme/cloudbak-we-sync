@@ -36,7 +36,18 @@ const tauriConf = JSON.parse(fs.readFileSync(tauriConfPath, "utf-8"));
 tauriConf.version = newVersion;
 fs.writeFileSync(tauriConfPath, JSON.stringify(tauriConf, null, 2));
 
-// 3. src-tauri/Cargo.toml
+// 3. package-lock.json（同步项目版本号，不影响依赖）
+const pkgLockPath = path.join(process.cwd(), "package-lock.json");
+if (fs.existsSync(pkgLockPath)) {
+  const pkgLock = JSON.parse(fs.readFileSync(pkgLockPath, "utf-8"));
+  pkgLock.version = newVersion;
+  if (pkgLock.packages?.[""]?.version !== undefined) {
+    pkgLock.packages[""].version = newVersion;
+  }
+  fs.writeFileSync(pkgLockPath, JSON.stringify(pkgLock, null, 2));
+}
+
+// 5. src-tauri/Cargo.toml
 const cargoPath = path.join(process.cwd(), "src-tauri/Cargo.toml");
 let cargoContent = fs.readFileSync(cargoPath, "utf-8");
 cargoContent = cargoContent.replace(
