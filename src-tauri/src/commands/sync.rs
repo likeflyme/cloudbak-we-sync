@@ -1,4 +1,5 @@
 use std::{collections::{HashMap, HashSet}, path::{Path, PathBuf}, sync::{Arc, atomic::{AtomicBool, Ordering}}};
+use std::error::Error as StdError;
 use crate::commands::auth::AuthState;
 use anyhow::Result;
 use once_cell::sync::Lazy;
@@ -208,11 +209,28 @@ fn upload_one_blocking(client: &reqwest::blocking::Client, base_url: &str, sys_s
         .text("client_mtime", local_mtime_ms.to_string())
         .part("file", part);
     if is_auto { form = form.text("is_auto", "true"); }
+
     let resp = match client.post(url).multipart(form).send() {
         Ok(r) => r,
         Err(e) => {
-            let chain = e.to_string();
-            tracing::error!(session_id = sys_session_id, file = %dest_path, err = %e, chain = %chain, is_auto, "upload send error");
+            // Expand the error chain for diagnostics (connect timeout/refused/reset, TLS, proxy, etc.)
+            let mut chain_parts: Vec<String> = Vec::new();
+            chain_parts.push(e.to_string());
+            let mut src = <reqwest::Error as std::error::Error>::source(&e);
+            while let Some(s) = src {
+                chain_parts.push(s.to_string());
+                src = std::error::Error::source(s);
+            }
+            let chain = chain_parts.join(" | ");
+
+            tracing::error!(
+                session_id = sys_session_id,
+                file = %dest_path,
+                err = %e,
+                chain = %chain,
+                is_auto,
+                "upload send error"
+            );
             return Err(e.into());
         }
     };
@@ -377,7 +395,7 @@ static AUTO_UPLOAD_QUEUE: Lazy<std::sync::mpsc::SyncSender<AutoUploadJob>> = Laz
         .ok()
         .and_then(|v| v.parse().ok())
         .filter(|&n| n > 0 && n <= 16)
-        .unwrap_or(4);
+        .unwrap_or(2);
 
     // Spawn background workers to consume queue
     for worker_id in 0..concurrency {
@@ -436,6 +454,13 @@ static AUTO_UPLOAD_QUEUE: Lazy<std::sync::mpsc::SyncSender<AutoUploadJob>> = Laz
 
                  // Build a blocking client; apply Authorization header if present
                  let mut client_builder = reqwest::blocking::Client::builder();
+                // Keep uploads resilient on slow networks / large files.
+                // NOTE: These should align with manual sync client's settings.
+                use std::time::Duration;
+                client_builder = client_builder
+                    .connect_timeout(Duration::from_secs(10))
+                    .tcp_keepalive(Duration::from_secs(30))
+                    .timeout(Duration::from_secs(1800));
                  if let Some(t) = token_opt {
                      let mut headers = reqwest::header::HeaderMap::new();
                      if let Ok(hval) = reqwest::header::HeaderValue::from_str(t.as_str()) {

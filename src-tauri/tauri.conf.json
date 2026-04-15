@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "we-sync",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "identifier": "org.cloudbak.we-sync",
   "build": {
     "beforeDevCommand": "npm run dev",

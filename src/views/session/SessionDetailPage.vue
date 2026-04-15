@@ -52,13 +52,13 @@
 
 <script setup lang="ts">
 import { ref, onMounted, watch, inject, computed, onUnmounted } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
+import { useRoute } from 'vue-router'
 import { NLayoutContent, NAlert, NButton, NSpace, createDiscreteApi } from 'naive-ui'
 import LoadingState from '@/components/SessionDetail/LoadingState.vue'
 import EmptyState from '@/components/SessionDetail/EmptyState.vue'
 import SessionDetail from '@/views/session/SessionDetail.vue'
 import type { Session } from '@/models/session'
-import { deleteSession as deleteSessionFromServer, updateSessionImgKey } from '@/api/user'
+import { updateSessionImgKey } from '@/api/user'
 import { invoke } from '@tauri-apps/api/core'
 import { endpoint, token as getToken } from '@/common/login'
 import { getSysInfoFromStore } from '@/common/store'
@@ -66,7 +66,6 @@ import { getSysInfoFromStore } from '@/common/store'
 const userId = Number(localStorage.getItem('user_id') || '0')
 
 const route = useRoute()
-const router = useRouter()
 const loading = ref(true)
 const session = ref<Session | null>(null)
 const keyVisibility = ref({
@@ -280,6 +279,49 @@ const handleUpdateImgKeys = async (payload: { aes_key: string; xor_key: string }
   }
 }
 
+const stopSync = async () => {
+  if (!taskId.value) return
+  try {
+    await invoke('stop_sync', { taskId: taskId.value })
+  } catch {
+    // ignore
+  }
+}
+
+const copyKey = async (key: string) => {
+  try {
+    await navigator.clipboard.writeText(key)
+  } catch {
+    try {
+      const textArea = document.createElement('textarea')
+      textArea.value = key
+      document.body.appendChild(textArea)
+      textArea.focus()
+      textArea.select()
+      document.execCommand('copy')
+      document.body.removeChild(textArea)
+    } catch {
+      // ignore
+    }
+  }
+}
+
+const removeSessionById = inject<(id: number) => void>('removeSessionById')
+
+const deleteSession = () => {
+  if (session.value?.id == null) return
+  const id = session.value.id
+  Promise.resolve()
+    .then(async () => {
+      try { await invoke('stop_auto_sync', { sysSessionId: id, userId }) } catch {}
+      try { await invoke('delete_session_config', { sessionId: id, userId }) } catch {}
+      removeSessionById && removeSessionById(id)
+    })
+    .catch((error) => {
+      console.error('Error deleting session:', error)
+    })
+}
+
 const MIN_SERVER_VERSION = '2.0.7'
 
 const parseSemver = (v: string): [number, number, number] => {
@@ -302,7 +344,6 @@ const serverVersion = ref<string>('')
 const handleSync = async (key: string) => {
   if (!session.value || syncing.value) return
 
-  // Require server version >= 2.0.7
   if (!serverVersion.value) {
     await loadServerVersionFromStore()
   }
@@ -320,73 +361,52 @@ const handleSync = async (key: string) => {
     })
     taskId.value = id
     syncing.value = true
-    manualSyncInProgress.value = true // 新增: 标记为手动同步
+    manualSyncInProgress.value = true
     syncStatus.value = { state: 'running', scanned: 0, to_upload: 0, uploaded: 0, skipped: 0, failed: 0 }
     startPolling()
-  } catch (e) {
+  } catch (e: any) {
+    const msg = typeof e === 'string' ? e : (e?.message || e?.toString?.() || '未知错误')
+    message.error(`开始同步失败：${msg}`)
     console.error('start_sync error', e)
   }
-}
-
-const stopSync = async () => {
-  if (!taskId.value) return
-  try {
-    await invoke('stop_sync', { taskId: taskId.value })
-  } catch (e) {
-    // ignore
-  }
-}
-
-const copyKey = async (key: string) => {
-  try {
-    await navigator.clipboard.writeText(key)
-  } catch (err) {
-    try {
-      const textArea = document.createElement('textarea')
-      textArea.value = key
-      document.body.appendChild(textArea)
-      textArea.focus()
-      textArea.select()
-      document.execCommand('copy')
-      document.body.removeChild(textArea)
-    } catch {
-      // ignore
-    }
-  }
-}
-
-const removeSessionById = inject<(id: number) => void>('removeSessionById')
-
-const deleteSession = () => {
-  // TODO: 调用后端删除会话，完成后返回列表
-  if (session.value?.id == null) return;
-  const id = session.value.id
-  deleteSessionFromServer(id).then(async () => {
-    // 停止此会话的自动同步 & 删除本地会话配置文件
-    try { await invoke('stop_auto_sync', { sysSessionId: id, userId }) } catch {}
-    try { await invoke('delete_session_config', { sessionId: id, userId }) } catch {}
-    removeSessionById && removeSessionById(id)
-    router.push('/')
-  }).catch((error) => {
-    console.error('Error deleting session:', error)
-  });
 }
 </script>
 
 <style scoped>
-.main-content { background: #f7f7f7; }
-.sync-status { margin: 16px 20px; }
-.sync-status-inner { display:block; width:100%; max-width:900px; }
-.status-text { width:100%; }
-.status-actions { width:100%; text-align:right; margin-top:4px; }
-.status-alert { width:100%; box-sizing:border-box; }
-.status-message { word-break:break-word; overflow-wrap:anywhere; }
-.stats { display:flex; gap:12px; flex-wrap:wrap; margin-top:6px; font-size:12px; color:#666; }
-.stats span { white-space:nowrap; }
-.stats .current { flex:1 1 100%; white-space:normal; word-break:break-all; overflow-wrap:anywhere; max-width:100%; line-height:1.4; }
-@media (max-width:760px){
-  .sync-status-inner { max-width:100%; width:100%; display:flex; }
-  .status-text, .status-alert { min-width:0; width:100%; }
-  .stats .current { flex:1 1 100%; }
+.main-content {
+  padding: 0;
+  /* margin-top: 64px; */
+  /* min-height: calc(100vh - 64px); */
+}
+
+.sync-status {
+  margin: 16px 0;
+  /* padding: 8px 16px; */
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.8);
+  backdrop-filter: blur(8px);
+}
+
+.stats {
+  font-size: 14px;
+  color: rgba(0, 0, 0, 0.65);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  line-height: 1.6;
+}
+
+.stats > span {
+  white-space: nowrap;
+}
+
+.current {
+  font-weight: bold;
+  color: #0078d4;
+}
+
+.status-actions {
+  margin-top: 8px;
+  text-align: right;
 }
 </style>
