@@ -15,12 +15,12 @@ name = "we_sync_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
-tauri-build = { version = "2", features = ["config-json5"] }
+tauri-build = { version = "=2.5.6", features = ["config-json5"] }
 
 [dependencies]
 # Pin to a specific tauri minor so it matches the JS packages' major/minor.
-tauri = { version = "=2.8.0", features = ["protocol-asset", "config-json5", "tray-icon"] }
-tauri-plugin-opener = "2"
+tauri = { version = "=2.10.1", features = ["protocol-asset", "config-json5", "tray-icon"] }
+tauri-plugin-opener = "2.4.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1.0"
@@ -42,7 +42,7 @@ rayon = "1.10"
 # Added for avatar decryption & DB access
 rusqlite = { version = "0.31", features = ["bundled"] }
 base64 = "0.22"
-tauri-plugin-http = "2"
+tauri-plugin-http = "2.5.2"
 reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls", "blocking"] }
 once_cell = "1.19"
 parking_lot = "0.12"
@@ -50,11 +50,11 @@ notify = "6"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "time", "env-filter"] }
 tracing-appender = "0.2"
-tauri-plugin-store = "2"
+tauri-plugin-store = "=2.3.0"
 sha1 = "0.10"
 
 # windows / winapi 已移至 [target.'cfg(target_os = "windows")'.dependencies]
-tauri-plugin-updater = "2.9.0"
+tauri-plugin-updater = "=2.9.0"
 tauri-plugin-autostart = "2"
 yara = { version = "0.29", features = ["yara-static", "vendored"] }
 regex = "1.11"
