@@ -501,7 +501,7 @@ static AUTO_UPLOAD_QUEUE: Lazy<std::sync::mpsc::SyncSender<AutoUploadJob>> = Laz
 // --- Auto Sync Watcher ---
 fn spawn_watcher(session_id: i32, user_id: i32, root: PathBuf, base_url: String, token: Option<String>, cancel: Arc<AtomicBool>) -> Result<()> {
     use notify::{RecommendedWatcher, RecursiveMode, Watcher};
-    if !root.exists() { anyhow::bail!("wx_dir not found"); }
+    if !root.exists() { anyhow::bail!("微信数据目录不存在：{}", root.display()); }
 
     // IMPORTANT: normalize to origin only (no /api or /app) to avoid /api/api/*
     let base_url = normalize_api_base(&base_url);
@@ -597,6 +597,39 @@ fn api_url(origin: &str, path: &str) -> String {
     let origin = origin.trim_end_matches('/');
     let path = path.trim_start_matches('/');
     format!("{}/api/{}", origin, path)
+}
+
+fn strip_windows_long_path_prefix(input: &str) -> String {
+    if let Some(rest) = input.strip_prefix("\\\\?\\UNC\\") {
+        format!("\\\\{}", rest)
+    } else if let Some(rest) = input.strip_prefix("\\\\?\\") {
+        rest.to_string()
+    } else {
+        input.to_string()
+    }
+}
+
+fn resolve_existing_wx_dir(raw: &str) -> Option<PathBuf> {
+    let mut candidates: Vec<String> = Vec::new();
+    let trimmed = raw.trim().trim_matches('"').trim_matches('\'').trim().to_string();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    candidates.push(trimmed.clone());
+    let stripped = strip_windows_long_path_prefix(&trimmed);
+    if stripped != trimmed {
+        candidates.push(stripped);
+    }
+
+    for c in candidates {
+        let p = PathBuf::from(&c);
+        if p.exists() {
+            return Some(p);
+        }
+    }
+
+    None
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -760,10 +793,16 @@ pub async fn start_sync(
     }
 
     tracing::info!(session_id = sys_session_id, user_id, %wx_dir, %base_url, full = ?full, "start_sync invoked");
-    let root = PathBuf::from(wx_dir);
+    let root = match resolve_existing_wx_dir(&wx_dir) {
+        Some(p) => p,
+        None => {
+            tracing::warn!(raw = %wx_dir, stripped = %strip_windows_long_path_prefix(&wx_dir), "wx_dir not found");
+            return Err(format!("微信数据目录不存在：{}", wx_dir));
+        }
+    };
     if !root.exists() {
         tracing::warn!(?root, "wx_dir not found");
-        return Err("wx_dir not found".into());
+        return Err(format!("微信数据目录不存在：{}", root.display()));
     }
     let task_id = sys_session_id.to_string();
 
@@ -1136,8 +1175,8 @@ pub async fn save_session_info(session_id: i32, user_id: i32, info: serde_json::
 
 #[tauri::command]
 pub async fn start_auto_sync(sys_session_id: i32, user_id: i32, wx_dir: String, base_url: String, token: Option<String>) -> Result<(), String> {
-     let root = PathBuf::from(&wx_dir);
-     if !root.exists() { return Err("本机未找到会话目录，无法开启自动同步".into()); }
+     let root = resolve_existing_wx_dir(&wx_dir)
+         .ok_or_else(|| format!("微信数据目录不存在：{}", wx_dir))?;
 
      // IMPORTANT: normalize to origin only (no /api or /app)
      let base_url = normalize_api_base(&base_url);
@@ -1225,11 +1264,11 @@ pub async fn init_user_auto_sync(app: AppHandle) -> Result<u32, String> {
         }
         if let Some(info) = cfg.session_info.as_ref() {
             if let Some(wx_dir_val) = info.get("wx_dir").and_then(|v| v.as_str()) {
-                if !wx_dir_val.is_empty() && Path::new(wx_dir_val).exists() {
+                if let Some(root) = resolve_existing_wx_dir(wx_dir_val) {
                     let cancel = Arc::new(AtomicBool::new(false));
                     let handle = WatchHandle { cancel: cancel.clone() };
                     WATCHERS.lock().insert(session_id.to_string(), handle);
-                    if let Err(e) = spawn_watcher(session_id, user_id.unwrap(), PathBuf::from(wx_dir_val), base_url.clone(), token.clone(), cancel) {
+                    if let Err(e) = spawn_watcher(session_id, user_id.unwrap(), root, base_url.clone(), token.clone(), cancel) {
                         tracing::error!(session_id, error = %e, "auto sync watcher start failed");
                      } else {
                         let mut active = ACTIVE_AUTO_SESSIONS.lock();
