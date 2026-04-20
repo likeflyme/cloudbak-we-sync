@@ -1,12 +1,15 @@
-use std::{collections::{HashMap, HashSet}, path::{Path, PathBuf}, sync::{Arc, atomic::{AtomicBool, Ordering}}};
-use std::error::Error as StdError;
+use std::{collections::{HashMap, HashSet}, io::{Read, Seek, SeekFrom}, path::{Path, PathBuf}, sync::{Arc, atomic::{AtomicBool, Ordering}}};
 use crate::commands::auth::AuthState;
 use anyhow::Result;
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tauri::AppHandle;
 use walkdir::WalkDir;
+
+const DIRECT_UPLOAD_MAX_BYTES: u64 = 4 * 1024 * 1024;
+const DEFAULT_CHUNK_SIZE: usize = 1024 * 1024;
 
 // --- Auto Sync global auth cache (per session) ---
 #[derive(Clone, Debug)]
@@ -67,6 +70,18 @@ struct RemoteEntry {
     size: Option<u64>,
     // server may return seconds or milliseconds; accept float and normalize later
     mtime: Option<f64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChunkCheckResponse {
+    exists: bool,
+    chunk_index: usize,
+    offset: u64,
+    chunk_size: usize,
+    server_chunk_size: usize,
+    hash: Option<String>,
+    file_size: u64,
+    mtime: Option<i64>,
 }
 
 fn normalize_rel<R: AsRef<Path>, F: AsRef<Path>>(root: R, full: F) -> String {
@@ -184,8 +199,14 @@ fn build_remote_map_incremental(
     Ok(map)
 }
 
-fn upload_one_blocking(client: &reqwest::blocking::Client, base_url: &str, sys_session_id: i32, root: &Path, file_path: &Path, is_auto: bool) -> Result<()> {
-    let dest_path = normalize_rel(root, file_path);
+fn upload_small_file_blocking(
+    client: &reqwest::blocking::Client,
+    base_url: &str,
+    sys_session_id: i32,
+    src_file_path: &Path,
+    dest_path: &str,
+    is_auto: bool,
+) -> Result<()> {
     let url = api_url(base_url, "sync/upload");
     tracing::debug!(
         session_id = sys_session_id,
@@ -195,15 +216,15 @@ fn upload_one_blocking(client: &reqwest::blocking::Client, base_url: &str, sys_s
         file = %dest_path,
         "upload url resolved"
     );
-    let local_mtime_ms = std::fs::metadata(file_path).ok().map(|m| file_mtime_millis(&m)).unwrap_or(0);
-    let file_size = std::fs::metadata(file_path).map(|m| m.len()).unwrap_or(0);
+    let local_mtime_ms = std::fs::metadata(src_file_path).ok().map(|m| file_mtime_millis(&m)).unwrap_or(0);
+    let file_size = std::fs::metadata(src_file_path).map(|m| m.len()).unwrap_or(0);
     tracing::trace!(session_id = sys_session_id, file = %dest_path, size = file_size, mtime = local_mtime_ms, is_auto, "upload_one_blocking start");
     let file_name = Path::new(&dest_path).file_name().and_then(|s| s.to_str()).unwrap_or("file").to_string();
-    let file_handle = std::fs::File::open(file_path)?;
+    let file_handle = std::fs::File::open(src_file_path)?;
     let part = reqwest::blocking::multipart::Part::reader_with_length(file_handle, file_size)
         .file_name(file_name);
     let mut form = reqwest::blocking::multipart::Form::new()
-        .text("dest_path", dest_path.clone())
+        .text("dest_path", dest_path.to_string())
         .text("sys_session_id", sys_session_id.to_string())
         .text("overwrite", "true")
         .text("client_mtime", local_mtime_ms.to_string())
@@ -249,6 +270,254 @@ fn upload_one_blocking(client: &reqwest::blocking::Client, base_url: &str, sys_s
     Ok(())
 }
 
+fn chunk_size() -> usize {
+    std::env::var("WESYNC_CHUNK_SIZE")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|&n| n >= 64 * 1024)
+        .unwrap_or(DEFAULT_CHUNK_SIZE)
+}
+
+fn chunk_check_blocking(
+    client: &reqwest::blocking::Client,
+    base_url: &str,
+    sys_session_id: i32,
+    dest_path: &str,
+    chunk_index: usize,
+    chunk_size: usize,
+    file_size: u64,
+) -> Result<ChunkCheckResponse> {
+    let url = api_url(base_url, "sync/chunk-check");
+    tracing::trace!(
+        session_id = sys_session_id,
+        file = %dest_path,
+        chunk_index,
+        chunk_size,
+        file_size,
+        url = %url,
+        "chunk check request"
+    );
+    let form = reqwest::blocking::multipart::Form::new()
+        .text("dest_path", dest_path.to_string())
+        .text("sys_session_id", sys_session_id.to_string())
+        .text("chunk_index", chunk_index.to_string())
+        .text("chunk_size", chunk_size.to_string())
+        .text("file_size", file_size.to_string())
+        .text("overwrite", "true");
+
+    let resp = client.post(url).multipart(form).send()?;
+    if !resp.status().is_success() {
+        anyhow::bail!("chunk check failed: {}", resp.status());
+    }
+    let body: ChunkCheckResponse = resp.json()?;
+    tracing::trace!(
+        session_id = sys_session_id,
+        file = %dest_path,
+        chunk_index = body.chunk_index,
+        offset = body.offset,
+        requested_chunk_size = chunk_size,
+        server_chunk_size = body.server_chunk_size,
+        file_size = body.file_size,
+        exists = body.exists,
+        hash = ?body.hash,
+        mtime = ?body.mtime,
+        "chunk check response"
+    );
+    Ok(body)
+}
+
+fn upload_chunk_blocking(
+    client: &reqwest::blocking::Client,
+    base_url: &str,
+    sys_session_id: i32,
+    dest_path: &str,
+    chunk_index: usize,
+    chunk_size: usize,
+    file_size: u64,
+    client_mtime_ms: i64,
+    chunk_payload: Vec<u8>,
+    chunk_hash: &str,
+    is_auto: bool,
+) -> Result<()> {
+    let url = api_url(base_url, "sync/chunk-upload");
+    let payload_size = chunk_payload.len();
+    tracing::info!(
+        session_id = sys_session_id,
+        file = %dest_path,
+        chunk_index,
+        chunk_size,
+        payload_size,
+        file_size,
+        is_auto,
+        url = %url,
+        "chunk upload request"
+    );
+    let file_name = format!(
+        "{}.part{}",
+        Path::new(dest_path).file_name().and_then(|s| s.to_str()).unwrap_or("file"),
+        chunk_index
+    );
+    let part = reqwest::blocking::multipart::Part::bytes(chunk_payload).file_name(file_name);
+    let mut form = reqwest::blocking::multipart::Form::new()
+        .text("dest_path", dest_path.to_string())
+        .text("sys_session_id", sys_session_id.to_string())
+        .text("chunk_index", chunk_index.to_string())
+        .text("chunk_size", chunk_size.to_string())
+        .text("file_size", file_size.to_string())
+        .text("client_mtime", client_mtime_ms.to_string())
+        .text("chunk_hash", chunk_hash.to_string())
+        .part("file", part);
+    if is_auto {
+        form = form.text("is_auto", "true");
+    }
+
+    let resp = client.post(url).multipart(form).send()?;
+    if !resp.status().is_success() {
+        anyhow::bail!("chunk upload failed: {}", resp.status());
+    }
+    tracing::info!(
+        session_id = sys_session_id,
+        file = %dest_path,
+        chunk_index,
+        chunk_size,
+        payload_size,
+        file_size,
+        is_auto,
+        "chunk upload success"
+    );
+    Ok(())
+}
+
+fn upload_large_file_blocking(
+    client: &reqwest::blocking::Client,
+    base_url: &str,
+    sys_session_id: i32,
+    src_file_path: &Path,
+    dest_path: &str,
+    is_auto: bool,
+) -> Result<()> {
+    let meta = std::fs::metadata(src_file_path)?;
+    let file_size = meta.len();
+    let local_mtime_ms = file_mtime_millis(&meta);
+    let chunk_size = chunk_size();
+    let chunk_size_u64 = chunk_size as u64;
+    let total_chunks = file_size.div_ceil(chunk_size_u64) as usize;
+    let mut file = std::fs::File::open(src_file_path)?;
+
+    tracing::info!(
+        session_id = sys_session_id,
+        file = %dest_path,
+        file_size,
+        chunk_size,
+        total_chunks,
+        is_auto,
+        "chunked upload start"
+    );
+
+    for chunk_index in 0..total_chunks {
+        let offset = chunk_index as u64 * chunk_size_u64;
+        let remaining = file_size.saturating_sub(offset);
+        let current_chunk_size = remaining.min(chunk_size_u64) as usize;
+        let mut payload = vec![0u8; current_chunk_size];
+        file.seek(SeekFrom::Start(offset))?;
+        file.read_exact(&mut payload)?;
+
+        let chunk_hash = {
+            let mut hasher = Sha256::new();
+            hasher.update(&payload);
+            format!("{:x}", hasher.finalize())
+        };
+
+        let check = chunk_check_blocking(
+            client,
+            base_url,
+            sys_session_id,
+            dest_path,
+            chunk_index,
+            chunk_size,
+            file_size,
+        )?;
+
+        let needs_upload = !check.exists
+            || check.chunk_index != chunk_index
+            || check.offset != offset
+            || check.chunk_size != chunk_size
+            || check.file_size != file_size
+            || check.server_chunk_size != current_chunk_size
+            || check.hash.as_deref().map(|s| !s.eq_ignore_ascii_case(&chunk_hash)).unwrap_or(true);
+
+        if !needs_upload {
+            tracing::debug!(
+                session_id = sys_session_id,
+                file = %dest_path,
+                chunk_index,
+                total_chunks,
+                offset,
+                current_chunk_size,
+                local_hash = %chunk_hash,
+                remote_hash = ?check.hash,
+                server_mtime = ?check.mtime,
+                "chunk unchanged, skip upload"
+            );
+            continue;
+        }
+
+        tracing::info!(
+            session_id = sys_session_id,
+            file = %dest_path,
+            chunk_index,
+            total_chunks,
+            offset,
+            current_chunk_size,
+            local_hash = %chunk_hash,
+            remote_hash = ?check.hash,
+            remote_exists = check.exists,
+            remote_file_size = check.file_size,
+            remote_chunk_size = check.server_chunk_size,
+            server_mtime = ?check.mtime,
+            "chunk changed, will upload"
+        );
+
+        upload_chunk_blocking(
+            client,
+            base_url,
+            sys_session_id,
+            dest_path,
+            chunk_index,
+            chunk_size,
+            file_size,
+            local_mtime_ms,
+            payload,
+            &chunk_hash,
+            is_auto,
+        )?;
+    }
+
+    tracing::info!(session_id = sys_session_id, file = %dest_path, total_chunks, is_auto, "chunked upload success");
+    Ok(())
+}
+
+fn upload_file_blocking(
+    client: &reqwest::blocking::Client,
+    base_url: &str,
+    sys_session_id: i32,
+    src_file_path: &Path,
+    dest_path: &str,
+    is_auto: bool,
+) -> Result<()> {
+    let file_size = std::fs::metadata(src_file_path)?.len();
+    if file_size <= DIRECT_UPLOAD_MAX_BYTES {
+        upload_small_file_blocking(client, base_url, sys_session_id, src_file_path, dest_path, is_auto)
+    } else {
+        upload_large_file_blocking(client, base_url, sys_session_id, src_file_path, dest_path, is_auto)
+    }
+}
+
+fn upload_one_blocking(client: &reqwest::blocking::Client, base_url: &str, sys_session_id: i32, root: &Path, file_path: &Path, is_auto: bool) -> Result<()> {
+    let dest_path = normalize_rel(root, file_path);
+    upload_file_blocking(client, base_url, sys_session_id, file_path, &dest_path, is_auto)
+}
+
 // 读取本地解析开关（来自 plugin-store 写入的 settings.json）
 fn get_local_parse_enabled() -> bool {
     if let Ok(base) = crate::internal::app_paths::app_data_dir() {
@@ -271,28 +540,7 @@ fn upload_with_dest_blocking(
     dest_path: &str,
     is_auto: bool,
 ) -> Result<()> {
-    let url = api_url(base_url, "sync/upload");
-    let local_mtime_ms = std::fs::metadata(src_file_path).ok().map(|m| file_mtime_millis(&m)).unwrap_or(0);
-    let file_size = std::fs::metadata(src_file_path).map(|m| m.len()).unwrap_or(0);
-    tracing::trace!(session_id = sys_session_id, file = %dest_path, size = file_size, mtime = local_mtime_ms, is_auto, "upload_with_dest_blocking start");
-    let file_name = Path::new(dest_path).file_name().and_then(|s| s.to_str()).unwrap_or("file").to_string();
-    let file_handle = std::fs::File::open(src_file_path)?;
-    let part = reqwest::blocking::multipart::Part::reader_with_length(file_handle, file_size)
-        .file_name(file_name);
-    let mut form = reqwest::blocking::multipart::Form::new()
-        .text("dest_path", dest_path.to_string())
-        .text("sys_session_id", sys_session_id.to_string())
-        .text("overwrite", "true")
-        .text("client_mtime", local_mtime_ms.to_string())
-        .part("file", part);
-    if is_auto { form = form.text("is_auto", "true"); }
-    let resp = client.post(url).multipart(form).send()?;
-    if !resp.status().is_success() {
-        tracing::warn!(session_id = sys_session_id, file = %dest_path, status = ?resp.status(), is_auto, "upload failed status");
-        anyhow::bail!("upload failed: {}", resp.status());
-    }
-    tracing::trace!(session_id = sys_session_id, file = %dest_path, is_auto, "upload success");
-    Ok(())
+    upload_file_blocking(client, base_url, sys_session_id, src_file_path, dest_path, is_auto)
 }
 
 fn load_session_config(session_id: i32, user_id: i32) -> Option<SessionConfig> {
