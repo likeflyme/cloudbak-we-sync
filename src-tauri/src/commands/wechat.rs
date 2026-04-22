@@ -24,7 +24,21 @@ pub async fn extract_wechat_db_keys(data_dir: Option<String>) -> Result<serde_js
         wechat::extract_db_keys(data_dir.as_deref())
     }).await.map_err(|e| format!("task join error: {}", e))?;
     match result {
-        Ok(keys) => Ok(keys.to_json()),
+        Ok(keys) => {
+            #[cfg(target_os = "windows")]
+            if keys.ok && keys.client_version == "v4" {
+                if let Some(ref dir) = keys.data_dir {
+                    if let Some(failed_file) = crate::internal::windows::validator::DBValidator::find_first_invalid_v4_db(dir, &keys.db_keys)
+                        .map_err(|e| format!("v4 db key validation failed: {}", e))?
+                    {
+                        return Ok(crate::internal::wechat::common::types::WechatKeys::fail(
+                            &format!("{failed_file} 文件的派生密钥获取失败，请多点击几个聊天后重新添加会话")
+                        ));
+                    }
+                }
+            }
+            Ok(keys.to_json())
+        }
         Err(e) => Ok(crate::internal::wechat::common::types::WechatKeys::fail(&e.to_string()))
     }
 }

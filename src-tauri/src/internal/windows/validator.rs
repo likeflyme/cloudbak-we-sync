@@ -25,46 +25,73 @@ pub struct DBValidator {
 }
 
 impl DBValidator {
-    pub fn new(data_dir: &str) -> Result<Self> {
+    fn collect_message_db_paths(data_dir: &str) -> Vec<PathBuf> {
         let message_dir = Path::new(data_dir).join("db_storage").join("message");
         let mut candidates: Vec<PathBuf> = Vec::new();
-        candidates.push(message_dir.join("message_0.db"));
-        // Fallback: enumerate message_*.db
+        let preferred = message_dir.join("message_0.db");
+        if preferred.exists() {
+            candidates.push(preferred);
+        }
         if let Ok(rd) = fs::read_dir(&message_dir) {
             for ent in rd.flatten() {
                 let p = ent.path();
-                if let Some(name) = p.file_name().and_then(|s| s.to_str()) {
-                    if name.starts_with("message_") && name.ends_with(".db") && p != candidates[0] {
-                        candidates.push(p);
-                    }
+                let Some(name) = p.file_name().and_then(|s| s.to_str()) else { continue; };
+                let is_message_db = name == "message_fts.db"
+                    || (name.starts_with("message_")
+                        && name.ends_with(".db")
+                        && name["message_".len()..name.len() - ".db".len()].chars().all(|c| c.is_ascii_digit()));
+                if !is_message_db {
+                    continue;
+                }
+                if !candidates.iter().any(|existing| existing == &p) {
+                    candidates.push(p);
                 }
             }
         }
+        candidates.sort_by(|a, b| {
+            let a_name = a.file_name().and_then(|s| s.to_str()).unwrap_or_default();
+            let b_name = b.file_name().and_then(|s| s.to_str()).unwrap_or_default();
+            a_name.cmp(b_name)
+        });
+        candidates
+    }
+
+    fn load_encrypted_first_page(db_path: &Path) -> Result<Option<Vec<u8>>> {
+        let buf = std::fs::File::open(db_path).and_then(|mut f| {
+            use std::io::Read;
+            let mut page = vec![0u8; PAGE_SIZE];
+            f.read_exact(&mut page)?;
+            Ok(page)
+        })?;
+        if &buf[..15] == b"SQLite format 3" {
+            return Ok(None);
+        }
+        Ok(Some(buf))
+    }
+
+    fn from_first_page(first_page: Vec<u8>) -> Result<Self> {
+        let mut salt = [0u8; SALT_SIZE];
+        salt.copy_from_slice(&first_page[..SALT_SIZE]);
+        Ok(Self { first_page, salt })
+    }
+
+    pub fn new(data_dir: &str) -> Result<Self> {
+        let candidates = Self::collect_message_db_paths(data_dir);
         let mut first_page: Option<Vec<u8>> = None;
         for cand in candidates {
             if !cand.exists() { continue; }
-            // Read only the first page (4KB) instead of the whole file
-            match std::fs::File::open(&cand).and_then(|mut f| {
-                use std::io::Read;
-                let mut page = vec![0u8; PAGE_SIZE];
-                // ensure we read PAGE_SIZE; if file is shorter, this will error
-                f.read_exact(&mut page)?;
-                Ok(page)
-            }) {
-                Ok(buf) => {
-                    // if starts with SQLite header => already decrypted, skip
-                    if &buf[..15] == b"SQLite format 3" { continue; }
+            match Self::load_encrypted_first_page(&cand) {
+                Ok(Some(buf)) => {
                     println!("[dbg] Using DB file: {}", cand.to_string_lossy());
                     first_page = Some(buf);
                     break;
                 }
+                Ok(None) => continue,
                 Err(_) => continue,
             }
         }
         let first_page = first_page.ok_or_else(|| anyhow::anyhow!("No suitable encrypted message_*.db found"))?;
-        let mut salt = [0u8; SALT_SIZE];
-        salt.copy_from_slice(&first_page[..SALT_SIZE]);
-        Ok(Self{ first_page, salt })
+        Self::from_first_page(first_page)
     }
 
     #[cfg(target_os = "windows")]
@@ -131,6 +158,36 @@ impl DBValidator {
         let calc = mac.finalize().into_bytes();
         let stored = &self.first_page[data_end..data_end+HMAC_SHA512_SIZE];
         subtle::ConstantTimeEq::ct_eq(&calc[..], stored).unwrap_u8() == 1
+    }
+
+    pub fn find_first_invalid_v4_db(data_dir: &str, db_keys_hex: &[String]) -> Result<Option<String>> {
+        let candidates = Self::collect_message_db_paths(data_dir);
+        if candidates.is_empty() {
+            return Ok(None);
+        }
+
+        let parsed_keys: Vec<[u8; KEY_SIZE]> = db_keys_hex.iter()
+            .filter_map(|key| {
+                let decoded = hex::decode(key).ok()?;
+                if decoded.len() != KEY_SIZE {
+                    return None;
+                }
+                let mut arr = [0u8; KEY_SIZE];
+                arr.copy_from_slice(&decoded);
+                Some(arr)
+            })
+            .collect();
+
+        for db_path in candidates {
+            let Some(first_page) = Self::load_encrypted_first_page(&db_path)? else { continue; };
+            let validator = Self::from_first_page(first_page)?;
+            let matched = parsed_keys.iter().any(|key| validator.validate_db_key(key));
+            if !matched {
+                let name = db_path.file_name().and_then(|s| s.to_str()).unwrap_or("unknown.db").to_string();
+                return Ok(Some(name));
+            }
+        }
+        Ok(None)
     }
 }
 

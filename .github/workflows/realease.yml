@@ -24,6 +24,36 @@ jobs:
     runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Generate release notes
+        id: notes
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+            let tagName = context.ref.startsWith('refs/tags/')
+              ? context.ref.replace('refs/tags/', '')
+              : '';
+
+            if (!tagName) {
+              const cargoToml = fs.readFileSync('src-tauri/Cargo.toml', 'utf8');
+              const match = cargoToml.match(/^version\s*=\s*"([^"]+)"/m);
+              if (!match) {
+                core.setFailed('Unable to determine tag name for release notes generation');
+                return;
+              }
+              tagName = `app-v${match[1]}`;
+            }
+
+            const { data } = await github.rest.repos.generateReleaseNotes({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              tag_name: tagName,
+            });
+            core.setOutput('body', data.body || '');
 
       - name: setup node
         uses: actions/setup-node@v4
@@ -45,7 +75,7 @@ jobs:
       - name: install frontend dependencies
         run: yarn install # change this to npm, pnpm or bun depending on which one you use.
 
-      - uses: tauri-apps/tauri-action@v0.6.0
+      - uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_PRIVATE_KEY }}
@@ -53,12 +83,11 @@ jobs:
         with:
           tagName: app-v__VERSION__ # the action automatically replaces \_\_VERSION\_\_ with the app version.
           releaseName: 'App v__VERSION__'
-          releaseBody: 'See the assets to download this version and install.'
+          releaseBody: ${{ steps.notes.outputs.body }}
           releaseDraft: true
           prerelease: false
 
           includeUpdaterJson: true
           updaterJsonPreferNsis: true
-          generateReleaseNotes: true
           
           args: ${{ matrix.args }}
