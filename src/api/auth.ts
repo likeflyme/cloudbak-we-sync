@@ -1,13 +1,18 @@
 import { fetch } from "@tauri-apps/plugin-http";
 
-export interface LoginModel { endpoint: string; username: string; password: string }
+export interface LoginModel { 
+  endpoint: string; 
+  username: string; 
+  password: string;
+  captcha?: string;
+}
 
 export const login = async (data: LoginModel) => {
     const endpoint = data.endpoint;
     let formData = new FormData();
     formData.append('username', data.username);
     formData.append('password', data.password);
-    formData.append('captcha', '');
+    formData.append('captcha', data.captcha || '');
     const url = endpoint + '/api/auth/token';
     return fetch(url, {
         method: 'POST',

@@ -43,6 +43,16 @@
           />
         </n-form-item>
 
+        <!-- Captcha field added when 461 error occurs -->
+        <n-form-item v-if="showCaptcha" label="验证码" path="captcha">
+          <n-input
+            v-model:value="form.captcha"
+            placeholder="请输入验证码"
+            clearable
+            @keyup.enter.prevent="login"
+          />
+        </n-form-item>
+
         <div class="actions">
           <n-button
             type="primary"
@@ -73,7 +83,6 @@ import type { FormInst, FormRules } from 'naive-ui'
 import { NCard, NForm, NFormItem, NInput, NButton, NAlert } from 'naive-ui'
 import { login as userLogin, me as fetchMe } from '@/api/auth'
 import { setTokenToStore, setEndpointToStore, setUserInfoToStore, getEndpointFromStore } from '@/common/store'
-// import { invoke } from '@tauri-apps/api/core'
 
 const router = useRouter()
 
@@ -81,12 +90,14 @@ const error_msg = ref('')
 const is_loading = ref(false)
 const login_btn_title = ref('登 录')
 const wechatGreen = '#07C160'
+const showCaptcha = ref(false) // Flag to show/hide captcha field
 
 // 登录表单模型
 type LoginForm = {
   endpoint: string
   username: string
   password: string
+  captcha?: string
 }
 
 const form = reactive<LoginForm>({
@@ -153,7 +164,8 @@ const login = async () => {
   const payload = {
     endpoint: form.endpoint.trim(),
     username: form.username,
-    password: form.password
+    password: form.password,
+    captcha: form.captcha || '' // Include captcha if exists
   }
 
   try {
@@ -216,6 +228,10 @@ const login = async () => {
 
     if (resp.status === 401) {
       error_msg.value = detail || '账号或密码错误'
+    } else if (resp.status === 461) {
+      // Show captcha field when 461 error occurs
+      showCaptcha.value = true
+      error_msg.value = detail || '需要输入验证码'
     } else {
       error_msg.value = detail ? `登录失败（${resp.status}）：${detail}` : `登录失败（${resp.status}）`
     }
