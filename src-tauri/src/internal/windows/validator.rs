@@ -1,6 +1,7 @@
 use anyhow::Result;
 use hmac::{Hmac, Mac};
 use sha2::Sha512;
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -147,6 +148,16 @@ impl DBValidator {
         (enc_key, mac_key)
     }
 
+    fn derive_raw_key_mac_key(raw_key: &[u8; KEY_SIZE], salt: &[u8; SALT_SIZE]) -> [u8; KEY_SIZE] {
+        let mut mac_salt = [0u8; SALT_SIZE];
+        for i in 0..SALT_SIZE { mac_salt[i] = salt[i] ^ 0x3a; }
+
+        let mut mac_key = [0u8; KEY_SIZE];
+        Self::pbkdf2_hmac_sha512(raw_key, &mac_salt, 2u64, &mut mac_key)
+            .expect("PBKDF2 (raw mac_key) failed");
+        mac_key
+    }
+
     pub fn validate_db_key(&self, key: &[u8]) -> bool {
         if key.len() != KEY_SIZE { return false; }
         let mut k = [0u8; KEY_SIZE]; k.copy_from_slice(key);
@@ -160,33 +171,108 @@ impl DBValidator {
         subtle::ConstantTimeEq::ct_eq(&calc[..], stored).unwrap_u8() == 1
     }
 
+    pub fn validate_raw_db_key(&self, key: &[u8]) -> bool {
+        if key.len() != KEY_SIZE { return false; }
+        let mut raw_key = [0u8; KEY_SIZE];
+        raw_key.copy_from_slice(key);
+        let mac_key = Self::derive_raw_key_mac_key(&raw_key, &self.salt);
+        let data_end = PAGE_SIZE - (IV_SIZE + HMAC_SHA512_SIZE) + IV_SIZE;
+        let mut mac = Hmac::<Sha512>::new_from_slice(&mac_key).unwrap();
+        mac.update(&self.first_page[SALT_SIZE..data_end]);
+        mac.update(&(1u32.to_le_bytes()));
+        let calc = mac.finalize().into_bytes();
+        let stored = &self.first_page[data_end..data_end+HMAC_SHA512_SIZE];
+        subtle::ConstantTimeEq::ct_eq(&calc[..], stored).unwrap_u8() == 1
+    }
+
+    fn parse_v4_salt_key_map(db_keys_hex: &[String]) -> HashMap<String, [u8; KEY_SIZE]> {
+        let mut salt_key_map = HashMap::new();
+        for key in db_keys_hex {
+            let key = key.trim();
+            if key.len() != 96 || !key.as_bytes().iter().all(|b| b.is_ascii_hexdigit()) {
+                continue;
+            }
+            let Some(sub_key_hex) = key.get(..64) else { continue; };
+            let Some(salt_hex) = key.get(64..96) else { continue; };
+            let Ok(decoded) = hex::decode(sub_key_hex) else { continue; };
+            if decoded.len() != KEY_SIZE {
+                continue;
+            }
+            let mut arr = [0u8; KEY_SIZE];
+            arr.copy_from_slice(&decoded);
+            salt_key_map.insert(salt_hex.to_ascii_lowercase(), arr);
+        }
+        salt_key_map
+    }
+
     pub fn find_first_invalid_v4_db(data_dir: &str, db_keys_hex: &[String]) -> Result<Option<String>> {
         let candidates = Self::collect_message_db_paths(data_dir);
         if candidates.is_empty() {
+            tracing::warn!(%data_dir, "no message db candidates found while validating derived keys");
             return Ok(None);
         }
 
-        let parsed_keys: Vec<[u8; KEY_SIZE]> = db_keys_hex.iter()
-            .filter_map(|key| {
-                let decoded = hex::decode(key).ok()?;
-                if decoded.len() != KEY_SIZE {
-                    return None;
-                }
-                let mut arr = [0u8; KEY_SIZE];
-                arr.copy_from_slice(&decoded);
-                Some(arr)
-            })
-            .collect();
+        let salt_key_map = Self::parse_v4_salt_key_map(db_keys_hex);
+
+        tracing::info!(
+            %data_dir,
+            candidate_count = candidates.len(),
+            parsed_key_count = salt_key_map.len(),
+            "start validating derived keys for message db files"
+        );
+
+        if salt_key_map.is_empty() {
+            tracing::warn!(
+                %data_dir,
+                raw_key_count = db_keys_hex.len(),
+                "no salt->derived-key pairs parsed from extractor output; skip derived-key validation"
+            );
+            return Ok(None);
+        }
+
+        let mut succeeded_files: Vec<String> = Vec::new();
+        let mut failed_files: Vec<String> = Vec::new();
 
         for db_path in candidates {
             let Some(first_page) = Self::load_encrypted_first_page(&db_path)? else { continue; };
             let validator = Self::from_first_page(first_page)?;
-            let matched = parsed_keys.iter().any(|key| validator.validate_db_key(key));
+            let db_name = db_path.file_name().and_then(|s| s.to_str()).unwrap_or("unknown.db");
+            let salt_hex = hex::encode(validator.salt);
+            let matched = salt_key_map
+                .get(&salt_hex)
+                .map(|key| validator.validate_raw_db_key(key))
+                .unwrap_or(false);
             if !matched {
-                let name = db_path.file_name().and_then(|s| s.to_str()).unwrap_or("unknown.db").to_string();
-                return Ok(Some(name));
+                tracing::warn!(
+                    %data_dir,
+                    db_file = db_name,
+                    salt = %salt_hex,
+                    db_path = %db_path.display(),
+                    "derived key validation failed for message db file"
+                );
+                failed_files.push(db_name.to_string());
+                continue;
             }
+            tracing::info!(
+                %data_dir,
+                db_file = db_name,
+                salt = %salt_hex,
+                db_path = %db_path.display(),
+                "derived key validation succeeded for message db file"
+            );
+            succeeded_files.push(db_name.to_string());
         }
+
+        if !failed_files.is_empty() {
+            tracing::warn!(
+                %data_dir,
+                succeeded_files = ?succeeded_files,
+                failed_files = ?failed_files,
+                "derived key validation completed with failures"
+            );
+            return Ok(failed_files.into_iter().next());
+        }
+        tracing::info!(%data_dir, "derived key validation succeeded for all message db files");
         Ok(None)
     }
 }
