@@ -1,6 +1,19 @@
 import { ftget, ftpost, ftdelete, ftput } from "./api";
 import { PartialSession } from "@/models/session";
 
+export interface SessionDerivedKeysResponse {
+    session_id: number;
+    keys: string[];
+    total_count: number;
+}
+
+export interface AppendSessionDerivedKeysResponse extends SessionDerivedKeysResponse {
+    added_keys: string[];
+    skipped_keys: string[];
+    added_count: number;
+    skipped_count: number;
+}
+
 
 export const getSessions = () => {
     return ftget('/api/user/sys-sessions');
@@ -53,5 +66,19 @@ export const updateSessionImgKey = (sessionId: number, aesKey: string, xorKey: n
         session_id: sessionId,
         aes_key: aesKey,
         xor_key: xorKey,
+    });
+}
+
+export const getSessionDerivedKeys = (sessionId: number): Promise<SessionDerivedKeysResponse> => {
+    return ftget(`/api/sys-session/${sessionId}/derived-keys`);
+}
+
+export const appendSessionDerivedKeys = (
+    sessionId: number,
+    keys: string[],
+): Promise<AppendSessionDerivedKeysResponse> => {
+    return ftpost('/api/sys-session/derived-keys', {
+        session_id: sessionId,
+        keys,
     });
 }

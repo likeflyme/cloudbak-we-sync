@@ -19,7 +19,7 @@ export interface Session {
   wx_key: string // new preferred data key
   aes_key: string // may be empty for v3
   xor_key: string // may be empty for v3
-  keys: string[] // array of extracted db keys
+  keys: string[] // server-side derived database keys for v4 sessions
 
   autoSync: boolean
   syncFilters: string

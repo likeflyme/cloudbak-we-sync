@@ -4,7 +4,7 @@ use serde::Serialize;
 pub struct WechatKeys {
   pub ok: bool,
   pub data_key: Option<String>,
-  pub db_keys: Vec<String>,       // 数据库密钥列表（从进程内存扫描 x'...' 模式得到）
+  pub db_keys: Vec<String>,       // 数据库派生密钥列表（64位key + 32位salt）
   pub image_key: Option<String>,
   pub xor_key: Option<String>,
   pub client_type: String,      // win | mac

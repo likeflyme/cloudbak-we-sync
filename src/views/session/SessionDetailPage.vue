@@ -9,11 +9,13 @@
           :session="session"
           :key-visibility="keyVisibility"
           :syncing="isRunning"
+          :derived-keys-syncing="derivedKeysSyncing"
           @toggle-auto-sync="toggleAutoSync"
           @toggle-key-visibility="toggleKeyVisibility"
           @copy-key="copyKey"
           @update:syncFilters="updateSyncFilters"
           @update-img-keys="handleUpdateImgKeys"
+          @sync-derived-keys="handleSyncDerivedKeys"
           @sync="handleSync"
           @delete="deleteSession"
         />
@@ -58,7 +60,11 @@ import LoadingState from '@/components/SessionDetail/LoadingState.vue'
 import EmptyState from '@/components/SessionDetail/EmptyState.vue'
 import SessionDetail from '@/views/session/SessionDetail.vue'
 import type { Session } from '@/models/session'
-import { updateSessionImgKey } from '@/api/user'
+import {
+  appendSessionDerivedKeys,
+  getSessionDerivedKeys,
+  updateSessionImgKey,
+} from '@/api/user'
 import { invoke } from '@tauri-apps/api/core'
 import { endpoint, token as getToken } from '@/common/login'
 import { getSysInfoFromStore } from '@/common/store'
@@ -71,16 +77,82 @@ const session = ref<Session | null>(null)
 const keyVisibility = ref({
   data_key: false,
   aes_key: false,
-  xor_key: false
+  xor_key: false,
+  derived_keys: false
 })
 
 const { message } = createDiscreteApi(['message'])
+
+const DERIVED_KEY_PATTERN = /^[0-9a-f]{96}$/
+
+interface LocalDerivedKeysResult {
+  ok?: boolean
+  dbKeys?: unknown
+  error?: string
+}
+
+const getErrorMessage = (error: unknown): string => {
+  if (typeof error === 'string') return error
+  if (error instanceof Error) return error.message
+  return String(error || '未知错误')
+}
+
+const isDerivedKeysApiNotFound = (error: unknown): boolean => {
+  return /\bHTTP\s+404\b/i.test(getErrorMessage(error))
+}
+
+const isV4Session = (value: Session): boolean => {
+  const raw = value.client_version || ''
+  const cleaned = raw.trim().toLowerCase().replace(/^v/, '')
+  return cleaned.split(/[._-]/)[0] === '4'
+}
+
+const parseDerivedKeys = (value: unknown, source: string): string[] => {
+  if (!Array.isArray(value)) {
+    throw new Error(`${source}未返回派生密钥列表`)
+  }
+
+  const normalized = new Set<string>()
+  for (const item of value) {
+    if (typeof item !== 'string') {
+      throw new Error(`${source}返回了格式不正确的派生密钥`)
+    }
+    const key = item.trim().toLowerCase()
+    if (!DERIVED_KEY_PATTERN.test(key)) {
+      throw new Error(`${source}返回了非 96 位十六进制派生密钥`)
+    }
+    normalized.add(key)
+  }
+  return [...normalized]
+}
+
+const loadServerDerivedKeys = async (target: Session): Promise<void> => {
+  try {
+    const response = await getSessionDerivedKeys(target.id)
+    if (response.session_id !== target.id) {
+      throw new Error('服务端返回的会话与当前会话不一致')
+    }
+    const keys = parseDerivedKeys(response.keys, '服务端')
+    if (session.value?.id === target.id) {
+      session.value.keys = keys
+    }
+  } catch (error) {
+    if (session.value?.id === target.id) {
+      if (isDerivedKeysApiNotFound(error)) {
+        message.error('当前服务端版本过低，请升级服务端到最新版本')
+      } else {
+        message.warning(`加载服务端派生密钥失败：${getErrorMessage(error)}`)
+      }
+    }
+  }
+}
 
 // get session by id from parent (Home.vue)
 const getSessionById = inject<(id: number) => Session | null | undefined>('getSessionById')
 
 // sync states
 const syncing = ref(false)
+const derivedKeysSyncing = ref(false)
 const taskId = ref<string | null>(null)
 const syncStatus = ref<{ state: string; scanned: number; to_upload: number; uploaded: number; skipped: number; failed: number; current?: string; message?: string}>({
   state: 'idle', scanned: 0, to_upload: 0, uploaded: 0, skipped: 0, failed: 0
@@ -144,11 +216,18 @@ const stopPolling = () => {
 onUnmounted(stopPolling)
 
 const normalize = (s: any): Session => {
+  let keys: string[] = []
+  try {
+    keys = parseDerivedKeys(s.keys ?? [], '会话')
+  } catch {
+    // 旧会话可能没有派生密钥字段或包含历史脏数据，等待服务端接口刷新。
+  }
   return {
     ...s,
     wx_acct_name: s.wx_acct_name ?? s.wx_name ?? '',
     wx_key: s.wx_key ?? s.data_key ?? '',
     data_key: s.data_key ?? s.wx_key ?? '',
+    keys,
     // defaults to satisfy child prop requirements
     syncFilters: s.syncFilters ?? '',
     autoSync: s.autoSync ?? false,
@@ -160,6 +239,7 @@ const normalize = (s: any): Session => {
 const load = async () => {
   loading.value = true
   session.value = null
+  keyVisibility.value.derived_keys = false
   const id = Number(route.params.id)
   try {
     // resolve from parent-provided list to avoid refetching
@@ -191,6 +271,10 @@ const load = async () => {
         const auto = await invoke<boolean>('get_auto_sync_state', { sessionId: session.value.id, userId })
         session.value.autoSync = !!auto
       } catch {}
+
+      if (isV4Session(session.value)) {
+        await loadServerDerivedKeys(session.value)
+      }
 
       // persist a snapshot of current session info for convenience
       try {
@@ -246,8 +330,73 @@ const toggleAutoSync = async () => {
   }
 }
 
-const toggleKeyVisibility = (key: 'data_key' | 'aes_key' | 'xor_key') => {
+const toggleKeyVisibility = (key: 'data_key' | 'aes_key' | 'xor_key' | 'derived_keys') => {
   keyVisibility.value[key] = !keyVisibility.value[key]
+}
+
+const handleSyncDerivedKeys = async () => {
+  const target = session.value
+  if (!target || !isV4Session(target) || derivedKeysSyncing.value) return
+  if (!target.wx_dir?.trim()) {
+    message.error('当前会话缺少微信数据目录，无法获取本地派生密钥。')
+    return
+  }
+
+  derivedKeysSyncing.value = true
+  try {
+    const serverResponse = await getSessionDerivedKeys(target.id)
+    if (serverResponse.session_id !== target.id) {
+      throw new Error('服务端返回的会话与当前会话不一致')
+    }
+    const serverKeys = parseDerivedKeys(serverResponse.keys, '服务端')
+    if (session.value?.id === target.id) {
+      session.value.keys = serverKeys
+    }
+
+    const localResponse = await invoke<LocalDerivedKeysResult>('extract_wechat_db_keys', {
+      dataDir: target.wx_dir,
+    })
+    if (!localResponse?.ok) {
+      const detail = localResponse?.error || '未获取到本地派生密钥'
+      if (/未找到.*微信.*进程|未找到可用的微信进程|wechat.*process/i.test(detail)) {
+        message.error('未检测到正在运行的微信，请启动并登录微信后重试。')
+      } else {
+        message.error(`获取本地派生密钥失败：${detail}；请确认微信已启动并登录。`)
+      }
+      return
+    }
+
+    const localKeys = parseDerivedKeys(localResponse.dbKeys, '本地提取器')
+    if (localKeys.length === 0) {
+      message.warning('未获取到本地派生密钥，请启动并登录微信后重试。')
+      return
+    }
+
+    const serverKeySet = new Set(serverKeys)
+    const missingKeys = localKeys.filter(key => !serverKeySet.has(key))
+    if (missingKeys.length === 0) {
+      message.success(`派生密钥已是最新（共 ${serverKeys.length} 个）`)
+      return
+    }
+
+    const appendResponse = await appendSessionDerivedKeys(target.id, missingKeys)
+    if (appendResponse.session_id !== target.id) {
+      throw new Error('服务端返回的会话与当前会话不一致')
+    }
+    const updatedKeys = parseDerivedKeys(appendResponse.keys, '服务端')
+    if (session.value?.id === target.id) {
+      session.value.keys = updatedKeys
+    }
+    message.success(`已同步 ${appendResponse.added_count} 个派生密钥，共 ${updatedKeys.length} 个`)
+  } catch (error) {
+    if (isDerivedKeysApiNotFound(error)) {
+      message.error('当前服务端版本过低，请升级服务端到最新版本')
+    } else {
+      message.error(`同步派生密钥失败：${getErrorMessage(error)}`)
+    }
+  } finally {
+    derivedKeysSyncing.value = false
+  }
 }
 
 const updateSyncFilters = (value: string) => {

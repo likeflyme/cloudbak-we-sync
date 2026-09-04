@@ -45,6 +45,65 @@
           {{ keyVisibility.data_key ? (session.data_key || session.wx_key) : maskKey(session.data_key || session.wx_key) }}
         </div>
       </div>
+
+      <!-- 派生密钥区域（仅微信 v4） -->
+      <div v-if="showDerivedKeys" class="key-item derived-key-item">
+        <div class="key-header derived-key-header">
+          <span class="key-label">派生密钥（{{ derivedKeys.length }}）</span>
+          <div class="key-actions">
+            <n-button
+              v-if="derivedKeys.length > 0"
+              size="small"
+              text
+              class="key-action-btn"
+              @click="$emit('toggleKeyVisibility', 'derived_keys')"
+            >
+              {{ keyVisibility.derived_keys ? '隐藏' : '查看' }}
+            </n-button>
+            <n-button
+              size="small"
+              type="primary"
+              class="extract-btn"
+              :loading="derivedKeysSyncing"
+              :disabled="derivedKeysSyncing"
+              @click="$emit('syncDerivedKeys')"
+            >
+              <template #icon>
+                <n-icon>
+                  <svg viewBox="0 0 24 24" fill="currentColor">
+                    <path d="M17.65,6.35C16.2,4.9 14.21,4 12,4A8,8 0 0,0 4,12A8,8 0 0,0 12,20C15.73,20 18.84,17.45 19.73,14H17.65C16.83,16.33 14.61,18 12,18A6,6 0 0,1 6,12A6,6 0 0,1 12,6C13.66,6 15.14,6.69 16.22,7.78L13,11H20V4L17.65,6.35Z"/>
+                  </svg>
+                </n-icon>
+              </template>
+              {{ derivedKeysSyncing ? '正在同步...' : '同步派生密钥' }}
+            </n-button>
+          </div>
+        </div>
+
+        <div v-if="derivedKeys.length > 0" class="derived-key-list">
+          <div v-for="(key, index) in derivedKeys" :key="key" class="derived-key-row">
+            <div class="key-value derived-key-value">
+              {{ keyVisibility.derived_keys ? key : maskKey(key) }}
+            </div>
+            <n-button
+              size="small"
+              text
+              class="key-action-btn derived-copy-btn"
+              :title="`复制派生密钥 ${index + 1}`"
+              @click="$emit('copyKey', key)"
+            >
+              <template #icon>
+                <n-icon>
+                  <svg viewBox="0 0 24 24" fill="currentColor">
+                    <path d="M19,21H8V7H19M19,5H8A2,2 0 0,0 6,7V21A2,2 0 0,0 8,23H19A2,2 0 0,0 21,21V7A2,2 0 0,0 19,5M16,1H4A2,2 0 0,0 2,3V17H4V3H16V1Z"/>
+                  </svg>
+                </n-icon>
+              </template>
+            </n-button>
+          </div>
+        </div>
+        <div v-else class="key-hint">服务端暂无派生密钥，请启动并登录微信后同步。</div>
+      </div>
       
       <!-- 图片密钥区域 (隐藏于 v3) -->
       <template v-if="showImageKeys">
@@ -227,14 +286,30 @@ const props = defineProps<{
     data_key: boolean;
     aes_key: boolean;
     xor_key: boolean;
+    derived_keys: boolean;
   };
+  derivedKeysSyncing: boolean;
 }>();
 
 const emit = defineEmits<{
   (e: 'copyKey', key: string): void;
-  (e: 'toggleKeyVisibility', key: 'data_key' | 'aes_key' | 'xor_key'): void;
+  (e: 'toggleKeyVisibility', key: 'data_key' | 'aes_key' | 'xor_key' | 'derived_keys'): void;
   (e: 'updateImgKeys', payload: { aes_key: string; xor_key: string }): void;
+  (e: 'syncDerivedKeys'): void;
 }>();
+
+const derivedKeys = computed(() => {
+  return Array.isArray(props.session.keys)
+    ? props.session.keys.filter((key): key is string => typeof key === 'string')
+    : []
+})
+
+const showDerivedKeys = computed(() => {
+  const raw = props.session.client_version || ''
+  const cleaned = raw.trim().toLowerCase().replace(/^v/, '')
+  const major = cleaned.split(/[._-]/)[0]
+  return major === '4'
+})
 
 // 根据客户端版本决定是否显示图片相关密钥 (v3 不显示)
 // 兼容 "v3", "3", "3.0.0", "v3.1" 等格式
@@ -425,6 +500,41 @@ const handleExtractImgKeys = async () => {
 
 .extract-img-key-item {
   border-left-color: #e6a700;
+}
+
+.derived-key-item {
+  border-left-color: #2080f0;
+}
+
+.derived-key-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 280px;
+  overflow-y: auto;
+}
+
+.derived-key-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.derived-key-value {
+  flex: 1;
+  min-width: 0;
+}
+
+.derived-copy-btn {
+  flex: 0 0 auto;
+}
+
+@media (max-width: 520px) {
+  .derived-key-header {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 10px;
+  }
 }
 
 .extract-btn {

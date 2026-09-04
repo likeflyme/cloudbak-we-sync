@@ -12,9 +12,11 @@
       <KeyInfoCard 
         :session="session" 
         :key-visibility="keyVisibility"
+        :derived-keys-syncing="derivedKeysSyncing"
         @toggle-key-visibility="$emit('toggle-key-visibility', $event)"
         @copy-key="$emit('copy-key', $event)"
         @update-img-keys="$emit('update-img-keys', $event)"
+        @sync-derived-keys="$emit('sync-derived-keys')"
       />
     </div>
 
@@ -59,20 +61,23 @@ interface KeyVisibility {
   data_key: boolean
   aes_key: boolean
   xor_key: boolean
+  derived_keys: boolean
 }
 
 defineProps<{
   session: Session
   keyVisibility: KeyVisibility
   syncing: boolean
+  derivedKeysSyncing: boolean
 }>()
 
 const emit = defineEmits<{
   (e: 'toggle-auto-sync'): void
-  (e: 'toggle-key-visibility', key: 'data_key' | 'aes_key' | 'xor_key'): void
+  (e: 'toggle-key-visibility', key: 'data_key' | 'aes_key' | 'xor_key' | 'derived_keys'): void
   (e: 'copy-key', key: string): void
   (e: 'update:syncFilters', value: string): void
   (e: 'update-img-keys', payload: { aes_key: string; xor_key: string }): void
+  (e: 'sync-derived-keys'): void
   (e: 'sync', key: string): void
   (e: 'delete'): void
 }>()

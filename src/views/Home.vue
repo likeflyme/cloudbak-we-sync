@@ -316,7 +316,7 @@ const showAddDialog = async () => {
     if (dirs.length === 1) {
       // 只有一个目录，直接使用
       chosenDir = dirs[0]
-      appendLog(`自动选择唯一目录: ${chosenDir}`, 'info')
+      appendLog('已自动选择唯一的微信数据目录', 'info')
     } else {
       // 多个或零个，弹窗让用户选择或输入
       isAddingSession.value = false // 暂时隐藏 loading，显示弹窗
@@ -328,7 +328,7 @@ const showAddDialog = async () => {
         return
       }
       isAddingSession.value = true // 恢复 loading
-      appendLog(`用户选择目录: ${chosenDir}`, 'info')
+      appendLog('用户已选择微信数据目录', 'info')
     }
 
     if (extractionCancelled.value) { appendLog('用户已取消', 'warn'); return }
@@ -348,14 +348,7 @@ const showAddDialog = async () => {
     // 记录数据库密钥信息
     const dbKeys: string[] = dbRes.dbKeys || []
     appendLog(`数据库密钥提取成功，共 ${dbKeys.length} 个密钥`, 'success')
-    if (dbKeys.length > 0) {
-      dbKeys.forEach((k: string, i: number) => {
-        // 只显示前8字符以保护隐私
-        const masked = k.length > 8 ? k.slice(0, 8) + '...' : k
-        appendLog(`  db_key[${i}]: ${masked}`)
-      })
-    }
-    if (dbRes.dataDir) { appendLog(`数据目录: ${dbRes.dataDir}`) }
+    if (dbRes.dataDir) { appendLog('微信数据目录已确认') }
     if (dbRes.clientType) { appendLog(`客户端类型: ${dbRes.clientType}`) }
     if (dbRes.clientVersion) { appendLog(`客户端版本: ${dbRes.clientVersion}`) }
 

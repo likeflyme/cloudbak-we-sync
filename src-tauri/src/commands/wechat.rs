@@ -19,7 +19,7 @@ pub async fn extract_wechat_db_keys(data_dir: Option<String>) -> Result<serde_js
     use crate::internal::wechat;
     // reset cancel flag at start
     EXTRACT_CANCEL_FLAG.store(false, Ordering::Relaxed);
-    tracing::info!(?data_dir, "extract_wechat_db_keys invoked");
+    tracing::info!(has_data_dir = data_dir.is_some(), "extract_wechat_db_keys invoked");
     let result = tokio::task::spawn_blocking(move || {
         wechat::extract_db_keys(data_dir.as_deref())
     }).await.map_err(|e| format!("task join error: {}", e))?;
@@ -49,17 +49,17 @@ pub async fn extract_wechat_img_keys(data_dir: Option<String>) -> Result<serde_j
     use crate::internal::wechat;
     // reset cancel flag at start
     EXTRACT_CANCEL_FLAG.store(false, Ordering::Relaxed);
-    tracing::info!(?data_dir, "extract_wechat_img_keys invoked");
+    tracing::info!(has_data_dir = data_dir.is_some(), "extract_wechat_img_keys invoked");
     let result = tokio::task::spawn_blocking(move || {
         tracing::info!("extract_wechat_img_keys: spawn_blocking started");
         let r = wechat::extract_img_keys(data_dir.as_deref());
-        tracing::info!(?r, "extract_wechat_img_keys: spawn_blocking result");
+        tracing::info!(success = r.is_ok(), "extract_wechat_img_keys: spawn_blocking finished");
         r
     }).await.map_err(|e| format!("task join error: {}", e))?;
     match result {
         Ok(keys) => {
             let json = keys.to_json();
-            tracing::info!(?json, "extract_wechat_img_keys: returning ok");
+            tracing::info!("extract_wechat_img_keys: returning ok");
             Ok(json)
         }
         Err(e) => {
@@ -74,7 +74,7 @@ pub async fn extract_wechat_img_keys(data_dir: Option<String>) -> Result<serde_j
 pub async fn extract_wechat_v3_avatar(wx_id: String, data_dir: String) -> Result<serde_json::Value, String> {
     use std::path::PathBuf;
     use base64::Engine;
-    tracing::info!(%wx_id, %data_dir, "extract_wechat_v3_avatar invoked");
+    tracing::info!("extract_wechat_v3_avatar invoked");
     let mut db_path = PathBuf::from(&data_dir);
     db_path.push("Msg");
     db_path.push("Misc.db");

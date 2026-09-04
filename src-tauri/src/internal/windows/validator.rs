@@ -25,6 +25,39 @@ pub struct DBValidator {
     salt: [u8; SALT_SIZE],
 }
 
+pub(crate) struct V4DbTarget {
+    db_name: String,
+    required_message: bool,
+    validator: DBValidator,
+}
+
+impl V4DbTarget {
+    pub(crate) fn db_name(&self) -> &str {
+        &self.db_name
+    }
+
+    pub(crate) fn salt(&self) -> [u8; SALT_SIZE] {
+        self.validator.salt
+    }
+
+    pub(crate) fn is_required_message(&self) -> bool {
+        self.required_message
+    }
+
+    pub(crate) fn validate_derived_key(&self, key: &[u8]) -> bool {
+        self.validator.validate_raw_db_key(key)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_first_page(db_name: &str, first_page: Vec<u8>) -> Result<Self> {
+        Ok(Self {
+            db_name: db_name.to_string(),
+            required_message: true,
+            validator: DBValidator::from_first_page(first_page)?,
+        })
+    }
+}
+
 impl DBValidator {
     fn collect_message_db_paths(data_dir: &str) -> Vec<PathBuf> {
         let message_dir = Path::new(data_dir).join("db_storage").join("message");
@@ -58,22 +91,117 @@ impl DBValidator {
     }
 
     fn load_encrypted_first_page(db_path: &Path) -> Result<Option<Vec<u8>>> {
-        let buf = std::fs::File::open(db_path).and_then(|mut f| {
+        let mut file = std::fs::File::open(db_path)?;
+        if file.metadata()?.len() < PAGE_SIZE as u64 {
+            return Ok(None);
+        }
+        let buf = {
             use std::io::Read;
             let mut page = vec![0u8; PAGE_SIZE];
-            f.read_exact(&mut page)?;
-            Ok(page)
-        })?;
+            file.read_exact(&mut page)?;
+            page
+        };
         if &buf[..15] == b"SQLite format 3" {
             return Ok(None);
         }
         Ok(Some(buf))
     }
 
+    fn is_required_message_db(db_storage_dir: &Path, db_path: &Path) -> bool {
+        let Some(parent) = db_path.parent() else { return false; };
+        if parent.parent() != Some(db_storage_dir) {
+            return false;
+        }
+        let is_message_dir = parent
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(|name| name.eq_ignore_ascii_case("message"))
+            .unwrap_or(false);
+        if !is_message_dir {
+            return false;
+        }
+        let Some(name) = db_path.file_name().and_then(|name| name.to_str()) else {
+            return false;
+        };
+        let name = name.to_ascii_lowercase();
+        name == "message_fts.db"
+            || (name.starts_with("message_")
+                && name.ends_with(".db")
+                && name["message_".len()..name.len() - ".db".len()]
+                    .chars()
+                    .all(|c| c.is_ascii_digit()))
+    }
+
+    fn collect_v4_db_paths(data_dir: &str) -> Vec<(PathBuf, String, bool)> {
+        let db_storage_dir = Path::new(data_dir).join("db_storage");
+        let mut candidates = Vec::new();
+        for entry in walkdir::WalkDir::new(&db_storage_dir)
+            .follow_links(false)
+            .into_iter()
+            .filter_map(|entry| entry.ok())
+        {
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            let path = entry.into_path();
+            let is_db = path
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .map(|extension| extension.eq_ignore_ascii_case("db"))
+                .unwrap_or(false);
+            if !is_db {
+                continue;
+            }
+            let db_name = path
+                .strip_prefix(&db_storage_dir)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            let required_message = Self::is_required_message_db(&db_storage_dir, &path);
+            candidates.push((path, db_name, required_message));
+        }
+        candidates.sort_by(|left, right| left.1.cmp(&right.1));
+        candidates
+    }
+
     fn from_first_page(first_page: Vec<u8>) -> Result<Self> {
+        if first_page.len() < PAGE_SIZE {
+            anyhow::bail!("encrypted database page is smaller than {PAGE_SIZE} bytes");
+        }
         let mut salt = [0u8; SALT_SIZE];
         salt.copy_from_slice(&first_page[..SALT_SIZE]);
         Ok(Self { first_page, salt })
+    }
+
+    pub(crate) fn load_v4_targets(data_dir: &str) -> Result<Vec<V4DbTarget>> {
+        let mut targets = Vec::new();
+        let mut skipped_unencrypted = 0usize;
+        let mut unreadable_optional = 0usize;
+        for (db_path, db_name, required_message) in Self::collect_v4_db_paths(data_dir) {
+            match Self::load_encrypted_first_page(&db_path) {
+                Ok(Some(first_page)) => targets.push(V4DbTarget {
+                    db_name,
+                    required_message,
+                    validator: Self::from_first_page(first_page)?,
+                }),
+                Ok(None) => skipped_unencrypted += 1,
+                Err(error) if required_message => {
+                    return Err(anyhow::anyhow!("无法读取加密消息数据库候选: {error}"));
+                }
+                Err(_) => unreadable_optional += 1,
+            }
+        }
+        tracing::info!(
+            target_count = targets.len(),
+            required_message_count = targets
+                .iter()
+                .filter(|target| target.is_required_message())
+                .count(),
+            skipped_unencrypted_count = skipped_unencrypted,
+            unreadable_optional_count = unreadable_optional,
+            "loaded Windows v4 database validation targets"
+        );
+        Ok(targets)
     }
 
     pub fn new(data_dir: &str) -> Result<Self> {
@@ -206,74 +334,201 @@ impl DBValidator {
     }
 
     pub fn find_first_invalid_v4_db(data_dir: &str, db_keys_hex: &[String]) -> Result<Option<String>> {
-        let candidates = Self::collect_message_db_paths(data_dir);
-        if candidates.is_empty() {
-            tracing::warn!(%data_dir, "no message db candidates found while validating derived keys");
+        let targets = Self::load_v4_targets(data_dir)?;
+        let required_target_count = targets
+            .iter()
+            .filter(|target| target.is_required_message())
+            .count();
+        if required_target_count == 0 {
+            tracing::warn!("no encrypted message db candidates found while validating derived keys");
             return Ok(None);
         }
 
         let salt_key_map = Self::parse_v4_salt_key_map(db_keys_hex);
 
         tracing::info!(
-            %data_dir,
-            candidate_count = candidates.len(),
+            candidate_count = required_target_count,
             parsed_key_count = salt_key_map.len(),
             "start validating derived keys for message db files"
         );
 
         if salt_key_map.is_empty() {
             tracing::warn!(
-                %data_dir,
                 raw_key_count = db_keys_hex.len(),
-                "no salt->derived-key pairs parsed from extractor output; skip derived-key validation"
+                "no salt->derived-key pairs parsed from extractor output"
             );
-            return Ok(None);
+            return Ok(targets
+                .iter()
+                .find(|target| target.is_required_message())
+                .map(|target| target.db_name().to_string()));
         }
 
-        let mut succeeded_files: Vec<String> = Vec::new();
-        let mut failed_files: Vec<String> = Vec::new();
+        let mut succeeded_count = 0usize;
+        let mut failed_count = 0usize;
+        let mut first_failed = None;
 
-        for db_path in candidates {
-            let Some(first_page) = Self::load_encrypted_first_page(&db_path)? else { continue; };
-            let validator = Self::from_first_page(first_page)?;
-            let db_name = db_path.file_name().and_then(|s| s.to_str()).unwrap_or("unknown.db");
-            let salt_hex = hex::encode(validator.salt);
+        for target in targets.into_iter().filter(|target| target.is_required_message()) {
+            let db_name = target.db_name();
+            let salt_hex = hex::encode(target.salt());
             let matched = salt_key_map
                 .get(&salt_hex)
-                .map(|key| validator.validate_raw_db_key(key))
+                .map(|key| target.validate_derived_key(key))
                 .unwrap_or(false);
             if !matched {
-                tracing::warn!(
-                    %data_dir,
-                    db_file = db_name,
-                    salt = %salt_hex,
-                    db_path = %db_path.display(),
-                    "derived key validation failed for message db file"
-                );
-                failed_files.push(db_name.to_string());
+                failed_count += 1;
+                if first_failed.is_none() {
+                    first_failed = Some(db_name.to_string());
+                }
                 continue;
             }
-            tracing::info!(
-                %data_dir,
-                db_file = db_name,
-                salt = %salt_hex,
-                db_path = %db_path.display(),
-                "derived key validation succeeded for message db file"
-            );
-            succeeded_files.push(db_name.to_string());
+            succeeded_count += 1;
         }
 
-        if !failed_files.is_empty() {
+        if failed_count > 0 {
             tracing::warn!(
-                %data_dir,
-                succeeded_files = ?succeeded_files,
-                failed_files = ?failed_files,
+                succeeded_count,
+                failed_count,
                 "derived key validation completed with failures"
             );
-            return Ok(failed_files.into_iter().next());
+            return Ok(first_failed);
         }
-        tracing::info!(%data_dir, "derived key validation succeeded for all message db files");
+        tracing::info!(succeeded_count, "derived key validation succeeded for all message db files");
         Ok(None)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pbkdf2::pbkdf2_hmac_array;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEST_DIR_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+    struct TestDir(PathBuf);
+
+    impl TestDir {
+        fn new() -> Self {
+            let sequence = TEST_DIR_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "we-sync-v4-validator-{}-{sequence}",
+                std::process::id()
+            ));
+            fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn write_file(root: &Path, relative: &str, contents: &[u8]) {
+        let path = root.join(relative);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, contents).unwrap();
+    }
+
+    fn valid_page(key: [u8; KEY_SIZE], salt: [u8; SALT_SIZE]) -> Vec<u8> {
+        let mut page = vec![0x5au8; PAGE_SIZE];
+        page[..SALT_SIZE].copy_from_slice(&salt);
+        let mac_salt: [u8; SALT_SIZE] = salt.map(|byte| byte ^ 0x3a);
+        let mac_key = pbkdf2_hmac_array::<Sha512, KEY_SIZE>(&key, &mac_salt, 2);
+        let data_end = PAGE_SIZE - (IV_SIZE + HMAC_SHA512_SIZE) + IV_SIZE;
+        let mut mac = Hmac::<Sha512>::new_from_slice(&mac_key).unwrap();
+        mac.update(&page[SALT_SIZE..data_end]);
+        mac.update(&1u32.to_le_bytes());
+        page[data_end..data_end + HMAC_SHA512_SIZE]
+            .copy_from_slice(&mac.finalize().into_bytes());
+        page
+    }
+
+    #[test]
+    fn loads_encrypted_databases_recursively_and_classifies_message_targets() {
+        let test_dir = TestDir::new();
+        let encrypted_page = vec![0x5au8; PAGE_SIZE];
+        let mut plaintext_page = vec![0u8; PAGE_SIZE];
+        plaintext_page[..15].copy_from_slice(b"SQLite format 3");
+
+        write_file(
+            test_dir.path(),
+            "db_storage/message/message_0.db",
+            &encrypted_page,
+        );
+        write_file(
+            test_dir.path(),
+            "db_storage/contact/contact.db",
+            &encrypted_page,
+        );
+        write_file(
+            test_dir.path(),
+            "db_storage/search/index.DB",
+            &encrypted_page,
+        );
+        write_file(
+            test_dir.path(),
+            "db_storage/session/session.db",
+            &plaintext_page,
+        );
+        write_file(test_dir.path(), "db_storage/other/tiny.db", &[0u8; 128]);
+        write_file(
+            test_dir.path(),
+            "db_storage/contact/contact.db-wal",
+            &encrypted_page,
+        );
+
+        let targets = DBValidator::load_v4_targets(test_dir.path().to_str().unwrap()).unwrap();
+        let names: Vec<&str> = targets.iter().map(V4DbTarget::db_name).collect();
+
+        assert_eq!(targets.len(), 3);
+        assert!(names.contains(&"message/message_0.db"));
+        assert!(names.contains(&"contact/contact.db"));
+        assert!(names.contains(&"search/index.DB"));
+        assert_eq!(
+            targets
+                .iter()
+                .filter(|target| target.is_required_message())
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn missing_optional_key_does_not_fail_required_message_validation() {
+        let test_dir = TestDir::new();
+        let message_key = std::array::from_fn(|index| (index + 1) as u8);
+        let message_salt = std::array::from_fn(|index| (index + 41) as u8);
+        let optional_key = std::array::from_fn(|index| (index + 81) as u8);
+        let optional_salt = std::array::from_fn(|index| (index + 121) as u8);
+        write_file(
+            test_dir.path(),
+            "db_storage/message/message_0.db",
+            &valid_page(message_key, message_salt),
+        );
+        write_file(
+            test_dir.path(),
+            "db_storage/contact/contact.db",
+            &valid_page(optional_key, optional_salt),
+        );
+        let db_keys = vec![format!(
+            "{}{}",
+            hex::encode(message_key),
+            hex::encode(message_salt)
+        )];
+
+        let invalid = DBValidator::find_first_invalid_v4_db(
+            test_dir.path().to_str().unwrap(),
+            &db_keys,
+        )
+        .unwrap();
+
+        assert_eq!(invalid, None);
     }
 }
 

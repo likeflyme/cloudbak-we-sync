@@ -369,10 +369,11 @@ pub fn find_wechat_v4_processes() -> Result<Vec<WeChatProcess>> {
         let name = strip_exe(p.name());
         if !name.eq_ignore_ascii_case("Weixin") { continue; }
         let cmdline = p.cmd().join(" ");
-        tracing::info!(pid = p.pid().as_u32(), name, ?cmdline, "found Weixin process");
+        let is_subprocess = cmdline.contains("--type=");
+        tracing::debug!(pid = p.pid().as_u32(), name, is_subprocess, "found Weixin process");
         // 只过滤带 --type= 的子进程 (wxplayer, wxocr, wxutility 等)
         // 主进程可能带 --scene=startmenu 等参数，不应过滤
-        if cmdline.contains("--type=") {
+        if is_subprocess {
             tracing::debug!(pid = p.pid().as_u32(), "skipping Weixin subprocess (has --type=)");
             continue;
         }
@@ -396,6 +397,29 @@ pub fn find_wechat_v4_processes() -> Result<Vec<WeChatProcess>> {
 
     tracing::info!(count = results.len(), "find_wechat_v4_processes: done");
     Ok(results)
+}
+
+/// Return every Weixin process, including helper processes carrying `--type=`.
+///
+/// Database configuration objects may live outside the UI process in newer
+/// WeChat builds, so key extraction must not reuse the filtering applied by
+/// `find_wechat_v4_processes`. Larger processes are scanned first because they
+/// are the most likely database hosts.
+pub(crate) fn find_all_weixin_pids() -> Vec<u32> {
+    let mut sys = System::new();
+    sys.refresh_specifics(RefreshKind::new().with_processes(ProcessRefreshKind::everything()));
+
+    let mut processes: Vec<(u32, u64)> = sys
+        .processes()
+        .values()
+        .filter(|process| strip_exe(process.name()).eq_ignore_ascii_case("Weixin"))
+        .map(|process| (process.pid().as_u32(), process.memory()))
+        .collect();
+    processes.sort_by(|(pid_a, memory_a), (pid_b, memory_b)| {
+        memory_b.cmp(memory_a).then_with(|| pid_a.cmp(pid_b))
+    });
+    tracing::info!(process_count = processes.len(), "found Weixin processes for key scan");
+    processes.into_iter().map(|(pid, _)| pid).collect()
 }
 
 pub fn find_wechat_v3_processes() -> Result<Vec<WeChatProcess>> {

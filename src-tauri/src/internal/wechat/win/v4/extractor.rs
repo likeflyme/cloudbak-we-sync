@@ -1,7 +1,9 @@
 use anyhow::{Result, anyhow};
 use crate::internal::windows::winproc;
+use crate::internal::windows::validator::DBValidator;
 use crate::internal::wechat::common::types::WechatKeys;
 use crate::internal::wechat::common::extractor_trait::KeyExtractor;
+use super::config_cipher;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
@@ -24,8 +26,27 @@ impl KeyExtractor for WinV4Extractor {
     let effective_dir = data_dir.map(|s| s.to_string()).or_else(|| selected.data_dir.clone());
     let full_version = selected.full_version.clone().unwrap_or_default();
     let client_version = full_version.split('.').next().map(|maj| if maj == "4" { "v4" } else { "unknown" }).unwrap_or("unknown").to_string();
-    // 通过扫描进程内存中的 x'<96 hex chars>' 模式提取数据库密钥
-    let db_keys = Self::scan_db_keys_from_memory(pid)?;
+    let target_dir = effective_dir.as_deref().ok_or_else(|| anyhow!("未找到微信数据目录，无法验证数据库密钥"))?;
+    let targets = DBValidator::load_v4_targets(target_dir)?;
+    let required_message_count = targets
+      .iter()
+      .filter(|target| target.is_required_message())
+      .count();
+    if required_message_count == 0 {
+      return Err(anyhow!("未找到可用于密钥验证的加密消息数据库"));
+    }
+    tracing::info!(
+      target_count = targets.len(),
+      required_message_count,
+      "prepared Windows v4 database key validation targets"
+    );
+    // 4.1.11+ first follows the obfuscated Config.Cipher object graph. The
+    // scanner then falls back to legacy x'<key><salt>' literals for 4.1.9.x.
+    let scan_pids = winproc::find_all_weixin_pids();
+    let db_keys = config_cipher::scan_verified_db_keys(&scan_pids, &targets)?;
+    if db_keys.is_empty() {
+      return Err(anyhow!("未能从微信进程中获取可验证的数据库派生密钥"));
+    }
     // Heuristic avatar extraction (contact image) from data_dir if present
     let mut avatar_base64: Option<String> = None;
     if let (Some(ref dir), Some(ref acct)) = (&effective_dir, &account_name) {
@@ -185,104 +206,6 @@ impl WinV4Extractor {
     None
   }
 
-  /// 扫描微信 v4 进程内存，查找 x'<96 hex chars>' 模式的数据库密钥
-  #[cfg(target_os = "windows")]
-  fn scan_db_keys_from_memory(pid: u32) -> Result<Vec<String>> {
-    use windows::Win32::System::Diagnostics::Debug::ReadProcessMemory;
-    use windows::Win32::System::Memory::{MEM_COMMIT, MEMORY_BASIC_INFORMATION, VirtualQueryEx};
-    use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ};
-    use windows::Win32::Foundation::BOOL;
-    use std::collections::HashSet;
-    use crate::commands::wechat::is_extract_cancelled;
-
-    // x'<96 hex chars>' 的前缀 b"x'" 用于快速定位
-    const PREFIX: &[u8] = b"x'";
-    const HEX_LEN: usize = 96;
-    // 总长度: x' + 96 hex + ' = 99
-    const MATCH_TOTAL: usize = 2 + HEX_LEN + 1;
-
-    fn is_hex_char(b: u8) -> bool {
-      matches!(b, b'0'..=b'9' | b'a'..=b'f' | b'A'..=b'F')
-    }
-
-    unsafe {
-      let h = OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_INFORMATION, BOOL(0), pid)
-        .map_err(|e| anyhow!("OpenProcess failed: {}", e))?;
-
-      let mut results: HashSet<String> = HashSet::new();
-      let mut address: usize = 0;
-      let max_addr: usize = 0x7FFF_FFFF_FFFF;
-
-      while address < max_addr {
-        if is_extract_cancelled() {
-          tracing::info!("scan_db_keys_from_memory cancelled");
-          break;
-        }
-
-        let mut mbi = MEMORY_BASIC_INFORMATION::default();
-        let res = VirtualQueryEx(h, Some(address as _), &mut mbi, std::mem::size_of::<MEMORY_BASIC_INFORMATION>());
-        if res == 0 { break; }
-
-        let base = mbi.BaseAddress as usize;
-        let size = mbi.RegionSize;
-
-        // 只扫描已提交的内存区域
-        if mbi.State == MEM_COMMIT && size > 0 && size <= 512 * 1024 * 1024 {
-          // 分块读取，每块 16MB
-          const CHUNK_SIZE: usize = 16 * 1024 * 1024;
-          let mut offset = 0usize;
-          while offset < size {
-            if is_extract_cancelled() { break; }
-            let to_read = std::cmp::min(CHUNK_SIZE, size - offset);
-            let mut buf = vec![0u8; to_read];
-            let mut bytes_read = 0usize;
-            let ok = ReadProcessMemory(
-              h, (base + offset) as _, buf.as_mut_ptr() as _, to_read, Some(&mut bytes_read)
-            );
-            if ok.is_ok() && bytes_read > 0 {
-              buf.truncate(bytes_read);
-              // 在 buf 中搜索所有 x'<96 hex>' 匹配
-              let mut search_pos = 0usize;
-              while search_pos + MATCH_TOTAL <= buf.len() {
-                if let Some(pos) = memchr::memmem::find(&buf[search_pos..], PREFIX) {
-                  let abs_pos = search_pos + pos;
-                  if abs_pos + MATCH_TOTAL <= buf.len() {
-                    let hex_start = abs_pos + 2;
-                    let hex_end = hex_start + HEX_LEN;
-                    let closing = hex_end;
-                    if buf[closing] == b'\'' && buf[hex_start..hex_end].iter().all(|&b| is_hex_char(b)) {
-                      let hex_str = std::str::from_utf8(&buf[hex_start..hex_end])
-                        .unwrap_or_default()
-                        .to_lowercase();
-                      results.insert(hex_str);
-                    }
-                    search_pos = abs_pos + 1; // 继续搜索下一个
-                  } else {
-                    break; // 剩余数据不够一个完整匹配
-                  }
-                } else {
-                  break; // 当前块中没有更多匹配
-                }
-              }
-            }
-            offset += to_read;
-          }
-        }
-
-        let next = base.saturating_add(size);
-        address = if next <= address { address.saturating_add(0x1000) } else { next };
-      }
-
-      tracing::info!("scan_db_keys_from_memory found {} unique keys", results.len());
-      Ok(results.into_iter().collect())
-    }
-  }
-
-  #[cfg(not(target_os = "windows"))]
-  fn scan_db_keys_from_memory(_pid: u32) -> Result<Vec<String>> {
-    Ok(vec![])
-  }
-
   /// 从 V2 .dat 缩略图文件中提取第一个 16 字节 AES 密文块
   /// V2 文件结构: [6B magic: 07 08 'V' '2' 08 07] [4B aes_size LE] [4B xor_size LE] [1B padding] [aes_data...]
   /// 密文块位于 offset 15..31
@@ -361,9 +284,9 @@ impl WinV4Extractor {
     let xor_key = x ^ 0xFF;
     let check = y ^ 0xD9;
     if xor_key == check {
-      tracing::info!("XOR key verified: 0x{:02x}", xor_key);
+      tracing::info!("XOR image key verified");
     } else {
-      tracing::warn!("XOR key mismatch: 0x{:02x} vs 0x{:02x}, using best guess 0x{:02x}", xor_key, check, xor_key);
+      tracing::warn!("XOR image key verification mismatch; using best candidate");
     }
     Some(xor_key)
   }
@@ -459,14 +382,14 @@ impl WinV4Extractor {
             // 尝试前 16 字符作为 AES-128 key
             if WinV4Extractor::try_aes_key(&buf[start..start + 16], ciphertext) {
               let key_str = std::str::from_utf8(&buf[start..start + 16]).unwrap_or_default().to_string();
-              tracing::info!("Found AES key (32-char, first 16): {}", &key_str);
+              tracing::info!("Found and verified AES image key from 32-character candidate");
               return Ok(Some(key_str));
             }
           } else if run_len == 16 {
             candidates_16 += 1;
             if WinV4Extractor::try_aes_key(&buf[start..start + 16], ciphertext) {
               let key_str = std::str::from_utf8(&buf[start..start + 16]).unwrap_or_default().to_string();
-              tracing::info!("Found AES key (16-char): {}", &key_str);
+              tracing::info!("Found and verified AES image key from 16-character candidate");
               return Ok(Some(key_str));
             }
           }
